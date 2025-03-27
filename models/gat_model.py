@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 
+
 class TrafficGAT(nn.Module):
     """
     Graph Attention Network (GAT) for Traffic Sensor Data.
@@ -22,25 +23,33 @@ class TrafficGAT(nn.Module):
         super().__init__()
         # First GAT convolution layer with multiple attention heads
         self.conv1 = GATConv(
-            in_dim, 
-            hidden_dim, 
-            heads=heads, 
-            edge_dim=edge_dim, 
+            in_dim,
+            hidden_dim,
+            heads=heads,
+            edge_dim=edge_dim,
             add_self_loops=False
         )
-        
+
         # Second GAT convolution layer with reduced heads
         self.conv2 = GATConv(
-            hidden_dim * heads, 
-            hidden_dim, 
-            heads=1, 
-            edge_dim=edge_dim, 
+            hidden_dim * heads,
+            hidden_dim,
+            heads=1,
+            edge_dim=edge_dim,
             add_self_loops=False
         )
-        
+
         # Final regression layer to predict traffic flows
-        self.regressor = nn.Linear(hidden_dim, 1)
-        
+        #  Regressor 1: Linear
+        #self.regressor = nn.Linear(hidden_dim, 1)
+
+        #  Regressor 2: MLP Regressor
+        self.regressor = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
         # Store attention weights for analysis
         self.attention_weights = []
 
@@ -58,18 +67,18 @@ class TrafficGAT(nn.Module):
 
         # First layer with attention
         x, attn1 = self.conv1(
-            x, 
-            edge_index, 
-            edge_attr=edge_attr, 
+            x,
+            edge_index,
+            edge_attr=edge_attr,
             return_attention_weights=True
         )
         self.attention_weights.append(attn1[1].detach().cpu())
 
         # Second layer with attention
         x, attn2 = self.conv2(
-            x, 
-            edge_index, 
-            edge_attr=edge_attr, 
+            x,
+            edge_index,
+            edge_attr=edge_attr,
             return_attention_weights=True
         )
         self.attention_weights.append(attn2[1].detach().cpu())
