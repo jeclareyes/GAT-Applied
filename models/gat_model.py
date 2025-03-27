@@ -96,3 +96,41 @@ class TrafficGAT(nn.Module):
         Useful between different forward passes or model evaluations.
         """
         self.attention_weights = []
+
+    def conservation_loss(self, pred_flows, data):
+        """
+        Calculate flow conservation loss to ensure network flow constraints.
+
+        This function enforces that:
+        1. The sum of outflows from each node equals its origin demand
+        2. The sum of inflows to each node equals its destination demand
+
+        Args:
+            pred_flows (torch.Tensor): Predicted flow values for each edge
+            data: PyTorch Geometric data object with node demands
+
+        Returns:
+            torch.Tensor: Conservation loss value (scalar)
+        """
+        # Get source and destination nodes for each edge
+        src, dst = data.edge_index
+
+        # Calculate total outflow from each node
+        outflow = torch.zeros(data.num_nodes, device=data.x.device)
+        # scatter_add_ accumulates flow values by source node
+        outflow.scatter_add_(0, src, pred_flows)  # Sum outgoing flows for each node
+
+        # Calculate total inflow to each node
+        inflow = torch.zeros(data.num_nodes, device=data.x.device)
+        # scatter_add_ accumulates flow values by destination node
+        inflow.scatter_add_(0, dst, pred_flows)  # Sum incoming flows for each node
+
+        # Get origin/destination demands from OD matrix
+        # data.x[:,0] = origin demand, data.x[:,1] = destination demand
+
+        # Calculate mean squared error between:
+        # 1. Predicted outflows and origin demands
+        # 2. Predicted inflows and destination demands
+        loss = F.mse_loss(outflow, data.x[:, 0]) + F.mse_loss(inflow, data.x[:, 1])
+
+        return loss

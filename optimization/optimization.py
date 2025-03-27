@@ -5,6 +5,26 @@ import numpy as np
 from tqdm import tqdm
 from evaluation.evaluation import compute_model_metrics
 
+def train_model(data, model_class, hidden_dim=64, heads=4, num_epochs=100, lr=0.01):
+    model = model_class(data.x.size(1), data.edge_attr.size(1), hidden_dim, heads).to(data.x.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    model.train()
+    for _ in range(num_epochs):
+        optimizer.zero_grad()
+        preds = model(data)
+        loss = F.mse_loss(preds[data.train_mask], data.edge_attr.squeeze()[data.train_mask])
+
+        #% Conservation
+
+        loss_conservation = model.conservation_loss(preds, data)
+        total_loss = loss + loss_conservation
+
+        #%
+        total_loss.backward()
+        optimizer.step()
+    return model
+
 def compute_edge_importance(model, data, num_epochs=100):
     """
     Compute edge importance by training the model and analyzing attention weights.
@@ -27,7 +47,7 @@ def compute_edge_importance(model, data, num_epochs=100):
 
     for _ in range(num_epochs):
         optimizer.zero_grad()
-        loss = F.mse_loss(model(data)[data.train_mask], data.y[data.train_mask])
+        loss = F.mse_loss(model(data)[data.train_mask], data.edge_attr.squeeze()[data.train_mask])
         loss.backward()
         optimizer.step()
 
@@ -48,7 +68,7 @@ def performance_based_pruning(model, data, edge_importance,
         edge_importance (numpy.ndarray): Computed edge importance scores
         max_error_increase (float, optional): Maximum allowed error increase. Defaults to 0.10.
         metric (str, optional): Performance metric to use. Defaults to 'mae'.
-    
+
     Returns:
         tuple: Optimized mask, final error, number of removed sensors
     """

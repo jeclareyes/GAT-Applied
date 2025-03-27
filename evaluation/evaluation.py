@@ -2,6 +2,7 @@
 import numpy as np
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import pandas as pd
 
 def compute_model_metrics(model, data, mask, metric='mae'):
     """
@@ -21,19 +22,24 @@ def compute_model_metrics(model, data, mask, metric='mae'):
     """
     model.eval()
     with torch.no_grad():
-        predictions = model(data)[mask].cpu().numpy()
+        #  predictions = model(data)[mask].cpu().numpy() #WHY DOES THIS NEED A MASK
+        predictions = model(data).cpu().numpy()
         targets = data.y[mask].cpu().numpy()
 
-        if metric == 'mae':
-            return mean_absolute_error(targets, predictions)
-        elif metric == 'rmse':
-            return np.sqrt(mean_squared_error(targets, predictions))
-        elif metric == 'mse':
-            return mean_squared_error(targets, predictions)
-        elif metric == 'r2':
-            return r2_score(targets, predictions)
-        else:
-            raise ValueError("Metric must be 'mae', 'rmse', or 'mse'.")
+    edge_index = data.edge_index.cpu().numpy().T
+    df_links = pd.DataFrame({
+        'source': edge_index[:, 0],
+        'target': edge_index[:, 1],
+        'predicted_flow': predictions,
+        'train_mask': data.train_mask.cpu().numpy(),
+        'true_flow': data.y.cpu().numpy(),
+        'observed_flow': data.edge_attr.squeeze().cpu().numpy(),
+    })
+
+    # Guardar a CSV
+    df_links.to_csv("link_predictions.csv", index=False)
+
+    print('Se imprimió dataframe de resultados\n', df_links.head())
 
 def validate_model(model, data, mask):
     """
@@ -59,6 +65,7 @@ def validate_model(model, data, mask):
             'r2': r2_score(targets, predictions)
         }
 
+
 def print_model_performance(metrics):
     """
     Print model performance metrics in a formatted way.
@@ -69,3 +76,4 @@ def print_model_performance(metrics):
     print("Model Performance Metrics:")
     for metric, value in metrics.items():
         print(f"{metric.upper()}: {value:.4f}")
+
