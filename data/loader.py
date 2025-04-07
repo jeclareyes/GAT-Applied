@@ -2,8 +2,10 @@
 import pickle
 import torch
 from torch_geometric.data import Data
+import os
+local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
-def load_traffic_data(filepath="traffic_data.pkl"):
+def load_traffic_data(name_file):
     """
     Load traffic data from a pickle file and prepare a PyTorch Geometric Data object.
     
@@ -15,8 +17,9 @@ def load_traffic_data(filepath="traffic_data.pkl"):
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    export_dir = os.path.join(local_path, name_file)
     # Load data from pickle file
-    with open(filepath, "rb") as f:
+    with open(export_dir, "rb") as f:
         traffic = pickle.load(f)
 
     # Extract node features (generated/attracted demand)

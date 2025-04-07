@@ -4,25 +4,38 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from evaluation.evaluation import compute_model_metrics
+import logging
+from utils.logger_config import setup_logger
 
-def train_model(data, model_class, hidden_dim=64, heads=4, num_epochs=100, lr=0.01):
+setup_logger()
+
+def train_model(data, model_class, hidden_dim=64, heads=4, num_epochs=1000, lr=0.01):
     model = model_class(data.x.size(1), data.edge_attr.size(1), hidden_dim, heads).to(data.x.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    sensors_flows = data.edge_attr.squeeze()
+    mask_sensors_flows = sensors_flows[data.train_mask]
 
     model.train()
     for _ in range(num_epochs):
         optimizer.zero_grad()
         preds = model(data)
-        loss = F.mse_loss(preds[data.train_mask], data.edge_attr.squeeze()[data.train_mask])
 
-        #% Conservation
+        loss_edges = F.mse_loss(preds[data.train_mask], mask_sensors_flows)
+
+        if _ % 250 == 0:
+            logging.info(f"Predictions: {preds.detach()}, Sensors: {sensors_flows.detach()}")
 
         loss_conservation = model.conservation_loss(preds, data)
-        total_loss = loss + loss_conservation
 
+
+        total_loss = loss_edges + loss_conservation
+        #total_loss = loss_edges
         #%
         total_loss.backward()
         optimizer.step()
+        """if _ % 10 == 0:
+            logging.info(f"It: {_}, loss edges: {loss_edges}, loss conservation: {0}"
+                         f", total loss:  {total_loss.item()}")"""
     return model
 
 def compute_edge_importance(model, data, num_epochs=100):

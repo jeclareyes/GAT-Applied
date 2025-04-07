@@ -99,6 +99,8 @@ class TrafficGAT(nn.Module):
 
     def conservation_loss(self, pred_flows, data):
         """
+        This is version 1.0
+
         Calculate flow conservation loss to ensure network flow constraints.
 
         This function enforces that:
@@ -112,6 +114,7 @@ class TrafficGAT(nn.Module):
         Returns:
             torch.Tensor: Conservation loss value (scalar)
         """
+        
         # Get source and destination nodes for each edge
         src, dst = data.edge_index
 

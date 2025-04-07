@@ -4,7 +4,7 @@ import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import pandas as pd
 
-def compute_model_metrics(model, data, mask, metric='mae'):
+def compute_model_metrics(model, data, mask, print_results=False, metric='mae'):
     """
     Compute specified evaluation metric for the model.
     
@@ -38,8 +38,8 @@ def compute_model_metrics(model, data, mask, metric='mae'):
 
     # Guardar a CSV
     df_links.to_csv("link_predictions.csv", index=False)
-
-    print('Se imprimió dataframe de resultados\n', df_links.head())
+    if print_results:
+        print('Se imprimió dataframe de resultados\n', df_links.head())
 
 def validate_model(model, data, mask):
     """
@@ -66,14 +66,15 @@ def validate_model(model, data, mask):
         }
 
 
-def print_model_performance(metrics):
+def print_model_performance(metrics, print_results=False):
     """
     Print model performance metrics in a formatted way.
     
     Args:
         metrics (dict): Dictionary of performance metrics
     """
-    print("Model Performance Metrics:")
-    for metric, value in metrics.items():
-        print(f"{metric.upper()}: {value:.4f}")
+    if print_results:
+        print("Model Performance Metrics:")
+        for metric, value in metrics.items():
+            print(f"{metric.upper()}: {value:.4f}")
 
