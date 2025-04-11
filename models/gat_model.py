@@ -1,139 +1,96 @@
-# models/gat.py
+# models/gat_model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 
-
 class TrafficGAT(nn.Module):
     """
-    Graph Attention Network (GAT) for Traffic Sensor Data.
-    
-    This model uses graph attention layers to learn node and edge representations
-    for traffic flow prediction.
-    
+    Graph Attention Network (GAT) adapted for ZAT/Intersection Traffic Model.
+
+    Predicts edge flows based on node embeddings learned via graph attention.
+    Assumes node features represent [is_zat, is_int, net_demand].
+    Uses a custom loss function (external) incorporating observed flows,
+    conservation, and ZAT demand constraints.
+
     Args:
-        in_dim (int): Input feature dimension for nodes, 2 (generation, attraction)
-        edge_dim (int): Dimension of edge attributes, 1
-        hidden_dim (int, optional): Hidden layer dimension. Defaults to 64.
-        heads (int, optional): Number of attention heads. Defaults to 4.
+        in_channels (int): Input feature dimension for nodes (should be 3).
+        hidden_dim (int, optional): Hidden layer dimension. Defaults to 16 or 64.
+        heads (int, optional): Number of attention heads in the first GAT layer. Defaults to 2 or 4.
     """
 
-    def __init__(self, in_dim, edge_dim, hidden_dim=64, heads=4):
+    def __init__(self, in_channels=3, hidden_dim=16, heads=2): # Default hidden_dim and heads adjusted
         super().__init__()
         # First GAT convolution layer with multiple attention heads
+        # Removed edge_dim, add_self_loops=False remains reasonable
         self.conv1 = GATConv(
-            in_dim,
+            in_channels,
             hidden_dim,
             heads=heads,
-            edge_dim=edge_dim,
+            dropout=0.6, # Added dropout like in the example
             add_self_loops=False
         )
 
-        # Second GAT convolution layer with reduced heads
+        # Second GAT convolution layer, outputting final node embeddings
+        # Input dimension is hidden_dim * heads
+        # Output dimension is hidden_dim (can be adjusted)
+        # Heads set to 1 and concat=False for final embedding layer often
         self.conv2 = GATConv(
             hidden_dim * heads,
-            hidden_dim,
+            hidden_dim, # Output dimension for node embeddings
             heads=1,
-            edge_dim=edge_dim,
+            concat=False, # Usually False for the last layer before prediction
+            dropout=0.6, # Added dropout
             add_self_loops=False
         )
 
-        # Final regression layer to predict traffic flows
-        #  Regressor 1: Linear
-        #self.regressor = nn.Linear(hidden_dim, 1)
-
-        #  Regressor 2: MLP Regressor
-        self.regressor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+        # MLP for predicting edge flow from concatenated node embeddings
+        # Input size is 2 * hidden_dim (from concatenated src and dst node embeddings)
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim), # Hidden layer in MLP
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1) # Output layer: predicts 1 value (flow)
         )
 
-        # Store attention weights for analysis
-        self.attention_weights = []
+        # Removed attention_weights storage and related methods for simplicity
+        # Removed the old conservation_loss method
 
     def forward(self, data):
         """
         Forward pass of the Graph Attention Network.
-        
-        Args:
-            data (Data): PyTorch Geometric Data object
-        
-        Returns:
-            torch.Tensor: Predicted traffic flows for edges
-        """
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-
-        # First layer with attention
-        x, attn1 = self.conv1(
-            x,
-            edge_index,
-            edge_attr=edge_attr,
-            return_attention_weights=True
-        )
-        self.attention_weights.append(attn1[1].detach().cpu())
-
-        # Second layer with attention
-        x, attn2 = self.conv2(
-            x,
-            edge_index,
-            edge_attr=edge_attr,
-            return_attention_weights=True
-        )
-        self.attention_weights.append(attn2[1].detach().cpu())
-
-        # Compute edge embeddings by summing source and destination node embeddings
-        src, dst = edge_index
-        edge_embeddings = x[src] + x[dst]
-
-        # Predict traffic flows for edges
-        return self.regressor(edge_embeddings).squeeze()
-
-    def reset_attention_weights(self):
-        """
-        Reset the stored attention weights.
-        Useful between different forward passes or model evaluations.
-        """
-        self.attention_weights = []
-
-    def conservation_loss(self, pred_flows, data):
-        """
-        This is version 1.0
-
-        Calculate flow conservation loss to ensure network flow constraints.
-
-        This function enforces that:
-        1. The sum of outflows from each node equals its origin demand
-        2. The sum of inflows to each node equals its destination demand
 
         Args:
-            pred_flows (torch.Tensor): Predicted flow values for each edge
-            data: PyTorch Geometric data object with node demands
+            data (Data): PyTorch Geometric Data object containing x and edge_index.
 
         Returns:
-            torch.Tensor: Conservation loss value (scalar)
+            torch.Tensor: Predicted non-negative traffic flows for edges.
         """
-        
-        # Get source and destination nodes for each edge
-        src, dst = data.edge_index
+        # Extract node features and edge topology
+        x, edge_index = data.x, data.edge_index
 
-        # Calculate total outflow from each node
-        outflow = torch.zeros(data.num_nodes, device=data.x.device)
-        # scatter_add_ accumulates flow values by source node
-        outflow.scatter_add_(0, src, pred_flows)  # Sum outgoing flows for each node
+        # Apply first GAT layer
+        # Note: edge_attr=None as we don't use edge features in GATConv here
+        x = F.dropout(x, p=0.6, training=self.training) # Dropout before conv1
+        x = self.conv1(x, edge_index, edge_attr=None)
+        x = F.elu(x) # ELU activation after conv1
 
-        # Calculate total inflow to each node
-        inflow = torch.zeros(data.num_nodes, device=data.x.device)
-        # scatter_add_ accumulates flow values by destination node
-        inflow.scatter_add_(0, dst, pred_flows)  # Sum incoming flows for each node
+        # Apply second GAT layer
+        x = F.dropout(x, p=0.6, training=self.training) # Dropout before conv2
+        x = self.conv2(x, edge_index, edge_attr=None)
+        # No activation needed after conv2 if followed by MLP? Or maybe ReLU/ELU? Let's keep it simple.
+        # x now contains the final node embeddings (shape: [num_nodes, hidden_dim])
 
-        # Get origin/destination demands from OD matrix
-        # data.x[:,0] = origin demand, data.x[:,1] = destination demand
+        # Predict edge flows using the MLP
+        edge_src = x[edge_index[0]] # Get embeddings for source nodes of edges
+        edge_dst = x[edge_index[1]] # Get embeddings for destination nodes of edges
 
-        # Calculate mean squared error between:
-        # 1. Predicted outflows and origin demands
-        # 2. Predicted inflows and destination demands
-        loss = F.mse_loss(outflow, data.x[:, 0]) + F.mse_loss(inflow, data.x[:, 1])
+        # Concatenate source and destination node embeddings
+        edge_features_concat = torch.cat([edge_src, edge_dst], dim=-1) # Shape: [num_edges, hidden_dim * 2]
 
-        return loss
+        # Pass concatenated features through the edge MLP
+        edge_flows = self.edge_mlp(edge_features_concat).squeeze(-1) # Squeeze the last dim (size 1)
+
+        # Ensure flows are non-negative
+        edge_flows = F.relu(edge_flows)
+
+        return edge_flows
