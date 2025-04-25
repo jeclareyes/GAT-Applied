@@ -887,17 +887,17 @@ def save_results(config, nodes, links, zat_od_matrix, assignment_results,
 if __name__ == "__main__":
     # Configuration parameters
     config = {
-        'NUM_ZATS': 2,
-        'NUM_INTERSECTIONS': 4,
-        'ZAT_DEMAND_RANGE': (1, 10),
+        'NUM_ZATS': 10,
+        'NUM_INTERSECTIONS': 20,
+        'ZAT_DEMAND_RANGE': (0, 500),
         'INTERSECTION_COMPLETENESS': 100,  # Percentage of links between intersections
-        'OBSERVATION_COVERAGE': 50,  # Percentage of road links to observe
-        'OBSERVED_FLOW_RANGE': (1, 10),
+        'OBSERVATION_COVERAGE': 30,  # Percentage of road links to observe
+        'OBSERVED_FLOW_RANGE': (0, 200),
         'SEED_NETWORK': None,
         'SEED_DEMAND': None,
         'SEED_OBSERVED': None,
         'MAX_TRIES': 1000,
-        'NAME_PICKLE_FILE': f'../data/traffic_data_{10}.pkl',
+        'NAME_PICKLE_FILE': f'../data/traffic_data_big.pkl',
         'LOG_FILE': "successful_runs_zat_log.jsonl"
     }
 

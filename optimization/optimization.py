@@ -1,175 +1,217 @@
-# optimization/optimization.py
+#!/usr/bin/env python3
+"""
+optimization.py
+
+Módulo para el entrenamiento y optimización del modelo GNN para asignación de tráfico.
+Incluye:
+    - Funciones de pérdida: custom_loss y mse_loss_vs_lp.
+    - Función train_model: que ejecuta el ciclo de entrenamiento usando la función de pérdida seleccionada.
+
+Se espera que el objeto data (de PyTorch Geometric) incluya atributos esenciales como:
+    - observed_flow_indices y observed_flow_values (para pérdida observada)
+    - in_edges_idx_tonode y out_edges_idx_tonode, node_types, zat_demands, node_id_map_rev y num_nodes
+      (para calcular las pérdidas de conservación y demanda).
+    - lp_assigned_flows, cuando se usa la pérdida 'mse_lp'.
+"""
+
 import torch
 import torch.nn.functional as F
-import numpy as np
-from tqdm import tqdm
-# from evaluation.evaluation import compute_model_metrics # Keep but might need adjustments
 import logging
-from utils.logger_config import setup_logger
-
-# Assuming models.gat_model TrafficGAT class is imported correctly
-# from models.gat_model import TrafficGAT
-
-setup_logger()
 
 
-# --- Added Custom Loss Function ---
-# (Copied from previous response, ensure consistency)
-def custom_loss(predicted_flows, data, w_observed=1.0, w_conservation=0.5, w_demand=0.5):
-    loss_observed = torch.tensor(0.0, device=predicted_flows.device)
-    loss_conservation = torch.tensor(0.0, device=predicted_flows.device)
-    loss_demand = torch.tensor(0.0, device=predicted_flows.device)
+# Configuración de logging (se asume que se invoca setup_logger en main-script)
+# from utils.logger_config import setup_logger
 
-    # 1. Error en flujos observados
-    if hasattr(data, 'observed_flow_indices') and data.observed_flow_indices.numel() > 0:
-        observed_vals = data.observed_flow_values.to(predicted_flows.device)
-        pred_vals = predicted_flows[data.observed_flow_indices]
-        loss_observed = F.mse_loss(pred_vals, observed_vals)
+def custom_loss(predicted_flows, data,
+                w_observed=1.0,
+                w_conservation=1.0,
+                w_demand=1.0,
+                normalize_losses=False):
+    """
+    Calcula la pérdida personalizada combinando:
+      1. Error respecto a flujos observados.
+      2. Error por conservación de flujos en intersecciones.
+      3. Error por equilibrio con demanda neta en nodos tipo ZAT.
 
-    # 2. Conservación en intersecciones y 3. Demanda en ZATs
+    Args:
+        predicted_flows (torch.Tensor): Flujos predichos (shape: [num_edges]).
+        data (torch_geometric.data.Data): Información de nodos y aristas.
+        w_observed (float): Peso para flujos observados.
+        w_conservation (float): Peso para conservación de flujo.
+        w_demand (float): Peso para equilibrio en ZATs.
+        normalize_losses (bool): Indica si se normalizan o no los términos.
+
+    Returns:
+        total_loss, loss_observed, loss_conservation, loss_demand
+    """
     eps = 1e-8
-    count_int = 0
-    count_zat = 0
+    device = predicted_flows.device
+
+    # ---------------------------------------------------
+    # 1. Pérdida por flujos observados
+    # ---------------------------------------------------
+    loss_observed = torch.tensor(0.0, device=device)
+    if hasattr(data, 'observed_flow_indices') and data.observed_flow_indices.numel() > 0:
+        observed_vals = data.observed_flow_values.to(device)
+        pred_vals = predicted_flows[data.observed_flow_indices]
+        mse_obs = F.mse_loss(pred_vals, observed_vals, reduction='mean')
+
+        if normalize_losses:
+            norm_obs = (observed_vals.mean() ** 2) + eps
+            loss_observed = mse_obs / norm_obs
+        else:
+            loss_observed = mse_obs
+
+    # ---------------------------------------------------
+    # 2. Pérdida por conservación de flujos en intersecciones
+    # ---------------------------------------------------
+    loss_conservation = torch.tensor(0.0, device=device)
+    count_intersections = 0
 
     for node_idx in range(data.num_nodes):
-        node_type = data.node_types[node_idx]
-        in_idx = data.in_edges_idx_tonode[node_idx].to(predicted_flows.device)
-        out_idx = data.out_edges_idx_tonode[node_idx].to(predicted_flows.device)
+        if data.node_types[node_idx] == 'intersection':
+            in_idx = data.in_edges_idx_tonode[node_idx].to(device)
+            out_idx = data.out_edges_idx_tonode[node_idx].to(device)
 
-        flow_in = predicted_flows[in_idx].sum() if in_idx.numel() > 0 else 0.0
-        flow_out = predicted_flows[out_idx].sum() if out_idx.numel() > 0 else 0.0
+            flow_in = predicted_flows[in_idx].sum() if in_idx.numel() > 0 else torch.tensor(0.0, device=device)
+            flow_out = predicted_flows[out_idx].sum() if out_idx.numel() > 0 else torch.tensor(0.0, device=device)
 
-        if node_type == 'intersection':
-            loss_conservation += torch.abs(flow_in - flow_out)
-            count_int += 1
+            imbalance = flow_in - flow_out
+            if normalize_losses:
+                denominator = (flow_in + flow_out)**2 + eps
+                loss_conservation += (imbalance**2) / denominator
+            else:
+                loss_conservation += imbalance**2
 
-        elif node_type == 'zat':
-            gen, attr = data.zat_demands.get(data.node_id_map_rev[node_idx], (0.0, 0.0))
-            gen = torch.tensor(gen, device=predicted_flows.device)
-            attr = torch.tensor(attr, device=predicted_flows.device)
-            loss_demand += torch.abs(flow_out - gen) + torch.abs(flow_in - attr)
-            count_zat += 1
+            count_intersections += 1
 
-    loss_conservation /= (count_int + eps)
-    loss_demand /= (count_zat + eps)
+    loss_conservation = loss_conservation / (count_intersections + eps)
 
-    total_loss = w_observed * loss_observed + w_conservation * loss_conservation + w_demand * loss_demand
+    # ---------------------------------------------------
+    # 3. Pérdida por equilibrio con demanda en nodos ZAT
+    # ---------------------------------------------------
+    loss_demand = torch.tensor(0.0, device=device)
+    count_zats = 0
+
+    for node_idx in range(data.num_nodes):
+        if data.node_types[node_idx] == 'zat':
+            node_id = data.node_id_map_rev[node_idx]
+            gen_val, attr_val = data.zat_demands.get(node_id, (0.0, 0.0))
+            gen_tensor = torch.tensor(gen_val, device=device, dtype=predicted_flows.dtype)
+            attr_tensor = torch.tensor(attr_val, device=device, dtype=predicted_flows.dtype)
+
+            in_idx = data.in_edges_idx_tonode[node_idx].to(device)
+            out_idx = data.out_edges_idx_tonode[node_idx].to(device)
+
+            flow_in = predicted_flows[in_idx].sum() if in_idx.numel() > 0 else torch.tensor(0.0, device=device)
+            flow_out = predicted_flows[out_idx].sum() if out_idx.numel() > 0 else torch.tensor(0.0, device=device)
+
+            imbalance = flow_in - flow_out
+            net_demand = attr_tensor - gen_tensor  # Equilibrio considerando demanda neta
+
+            if normalize_losses:
+                denominator = (net_demand**2) + eps
+                loss_demand += ((imbalance - net_demand)**2) / denominator
+            else:
+                loss_demand += (imbalance - net_demand)**2
+
+            count_zats += 1
+
+    loss_demand = loss_demand / (count_zats + eps)
+
+    # ---------------------------------------------------
+    # 4. Combinación ponderada de todas las pérdidas
+    # ---------------------------------------------------
+    total_loss = (w_observed * loss_observed +
+                  w_conservation * loss_conservation +
+                  w_demand * loss_demand)
+
     return total_loss, loss_observed, loss_conservation, loss_demand
 
 
-# --- Modified Train Function ---
-def train_model(data, model_class, hidden_dim=64, heads=4, num_epochs=500, lr=0.01,
-                w_observed=1.0, w_conservation=0.5, w_demand=0.5):
-    model = model_class(in_channels=data.x.size(1), hidden_dim=hidden_dim, heads=heads).to(data.x.device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+def mse_loss_vs_lp(predicted_flows, data):
+    """
+    Calcula el error cuadrático medio (MSE) entre los flujos predichos y los flujos asignados
+    por el método de programación lineal (almacenados en data.lp_assigned_flows).
 
-    logging.info("Inicio del entrenamiento con pérdida compuesta...")
-    model.train()
+    Args:
+        predicted_flows (torch.Tensor): Flujos predichos (shape: [num_edges]).
+        data (torch_geometric.data.Data): Objeto Data que debe incluir 'lp_assigned_flows'.
+
+    Returns:
+        torch.Tensor: Valor escalar representando el MSE.
+    """
+    if not hasattr(data, 'lp_assigned_flows'):
+        raise AttributeError("El objeto Data no tiene 'lp_assigned_flows' requerido para mse_loss_vs_lp.")
+    target_flows = data.lp_assigned_flows.to(predicted_flows.device).view_as(predicted_flows)
+    loss = F.mse_loss(predicted_flows, target_flows)
+    return loss
+
+
+def train_model(data, model, optimizer, num_epochs=500,
+                w_observed=1.0, w_conservation=1.0, w_demand=1.0,
+                loss_function_type='custom', normalize_losses=False):
+    """
+    Ejecuta el ciclo de entrenamiento del modelo GNN utilizando la función de pérdida seleccionada.
+
+    Args:
+        data (torch_geometric.data.Data): Datos de entrada y etiquetas.
+        model (torch.nn.Module): Modelo GNN pre-instanciado.
+        optimizer (torch.optim.Optimizer): Optimizador para actualizar los parámetros.
+        num_epochs (int): Número total de épocas.
+        w_observed (float): Peso para la pérdida de flujos observados.
+        w_conservation (float): Peso para la pérdida de conservación de flujos.
+        w_demand (float): Peso para la pérdida basada en demanda.
+        loss_function_type (str): Tipo de pérdida a utilizar ('custom' o 'mse_lp').
+
+    Returns:
+        tuple: (modelo entrenado, información de entrenamiento como diccionario con pérdidas por época).
+    """
+    device = next(model.parameters()).device
+    data = data.to(device)
+
+    # Seleccionar la función de pérdida en base al parámetro
+    if loss_function_type == 'custom':
+        loss_fn = lambda pred: custom_loss(pred, data, w_observed, w_conservation, w_demand, normalize_losses)[0]
+        logging.info(
+            f"Usando custom_loss: w_observed={w_observed}, w_conservation={w_conservation}, w_demand={w_demand}")
+        required_attrs = [
+            'observed_flow_indices', 'observed_flow_values',
+            'in_edges_idx_tonode', 'out_edges_idx_tonode',
+            'node_types', 'zat_demands', 'node_id_map_rev', 'num_nodes'
+        ]
+        for attr in required_attrs:
+            if not hasattr(data, attr):
+                logging.error(f"El objeto Data no tiene el atributo '{attr}' requerido para custom_loss.")
+                return model, {"error": f"Falta {attr}"}
+    elif loss_function_type == 'mse_lp':
+        loss_fn = lambda pred: mse_loss_vs_lp(pred, data)
+        logging.info("Usando mse_loss_vs_lp para la pérdida.")
+        if not hasattr(data, 'lp_assigned_flows'):
+            logging.error("El objeto Data no contiene 'lp_assigned_flows' necesario para mse_loss_vs_lp.")
+            return model, {"error": "Falta lp_assigned_flows"}
+    else:
+        logging.error(f"Tipo de función de pérdida inválido: {loss_function_type}")
+        return model, {"error": "Función de pérdida inválida"}
+
+    training_info = {"epochs_run": 0, "losses": []}
 
     for epoch in range(num_epochs):
+        model.train()
         optimizer.zero_grad()
-        pred = model(data)
-        total, l_obs, l_cons, l_dem = custom_loss(pred, data,
-                                                  w_observed=w_observed,
-                                                  w_conservation=w_conservation,
-                                                  w_demand=w_demand)
-        total.backward()
+        outputs = model(data)
+        if loss_function_type == 'custom':
+            loss, loss_obs, loss_cons, loss_dem = custom_loss(outputs, data, w_observed, w_conservation, w_demand,
+                                                              normalize_losses)
+        else:
+            loss = mse_loss_vs_lp(outputs, data)
+        loss.backward()
         optimizer.step()
 
-        if epoch % 100 == 0 or epoch == num_epochs - 1:
-            logging.info(
-                f"Epoch {epoch:04d} | Total: {total.item():.4f} | Obs: {l_obs.item():.4f} | Cons: {l_cons.item():.4f} | Dem: {l_dem.item():.4f}")
+        training_info["epochs_run"] = epoch + 1
+        training_info["losses"].append(loss.item())
+        if (epoch % 100 == 0) or (epoch == num_epochs - 1):
+            logging.info(f"Epoch {epoch + 1}/{num_epochs} - Loss: {loss.item():.2f} - Obs: {loss_obs.item():.2f} "
+                         f"- Cons: {loss_cons.item():.2f} - Demand {loss_dem.item():.2f}")
 
-    logging.info("Entrenamiento finalizado.")
-    return model
-
-
-# --- Pruning and Optimization Functions (NEED ADAPTATION) ---
-# NOTE: The functions below (compute_edge_importance, performance_based_pruning,
-# optimize_sensor_network) are likely incompatible with the new model structure
-# and loss function. They rely on the old way of calculating MSE loss directly
-# on edges using train_mask and edge_attr, and potentially on analyzing
-# attention weights which might have changed or been removed.
-# Adapting these requires rethinking how "importance" is measured (maybe based on
-# gradient magnitude, effect on loss components, etc.) and how pruning affects
-# the custom loss. Commenting out or careful review/rewrite is needed.
-
-def compute_edge_importance(model, data, num_epochs=100):
-    logging.warning("compute_edge_importance needs review/adaptation for the new model/loss structure.")
-    # Placeholder: return random importance for now
-    return np.random.rand(data.num_edges)
-    # --- Original code below is likely incompatible ---
-    # device = data.x.device
-    # model = model.to(device)
-    # data = data.to(device)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    # model.train()
-    # model.reset_attention_weights() # Assumes this method exists
-    # for _ in range(num_epochs):
-    #     optimizer.zero_grad()
-    #     # Original loss calculation based on edge_attr and train_mask
-    #     loss = F.mse_loss(model(data)[data.train_mask], data.edge_attr.squeeze()[data.train_mask])
-    #     loss.backward()
-    #     optimizer.step()
-    # attentions = torch.cat(model.attention_weights, dim=1) # Assumes attention_weights are stored
-    # edge_importance = attentions.mean(dim=1)
-    # return edge_importance.cpu().numpy()
-
-
-def compute_model_metrics(model, data, metric='mae'):
-    """
-    Computes basic metrics based on observed flows.
-    NOTE: Assumes 'data' contains observed_indices and observed_values.
-          The concept of a 'mask' argument is less relevant here unless
-          referring to a specific subset of observed values for evaluation.
-    """
-    model.eval()
-    with torch.no_grad():
-        pred_flows = model(data)
-
-    if not hasattr(data, 'observed_indices') or data.observed_indices.numel() == 0:
-        logging.warning("No observed flows found in data for metric calculation.")
-        return 0.0 if metric == 'count' else float('nan')  # Return NaN or 0
-
-    # Get predictions corresponding to observed flows
-    pred_observed = pred_flows[data.observed_indices]
-    true_observed = data.observed_values.to(pred_observed.device)  # Ensure same device
-
-    if metric == 'mae':
-        return F.l1_loss(pred_observed, true_observed).item()
-    elif metric == 'rmse':
-        return torch.sqrt(F.mse_loss(pred_observed, true_observed)).item()
-    elif metric == 'mse':
-        return F.mse_loss(pred_observed, true_observed).item()
-    elif metric == 'count':
-        return data.observed_indices.numel()  # Number of observed sensors
-    else:
-        logging.error(f"Unsupported metric: {metric}")
-        return float('nan')
-
-
-def performance_based_pruning(model, data, edge_importance,
-                              max_error_increase=0.10, metric='mae'):
-    logging.warning("performance_based_pruning needs significant review/adaptation.")
-    # This function needs a major rewrite. It relies on manipulating train_mask
-    # and recalculating metrics based on that mask, which doesn't fit the new
-    # loss structure where observations are handled differently.
-    # Returning the original observed mask as a placeholder.
-    if hasattr(data, 'observed_mask'):
-        return data.observed_mask.clone(), compute_model_metrics(model, data, metric), 0
-    else:
-        # Cannot proceed without observed_mask
-        raise AttributeError("Data object missing 'observed_mask' required for placeholder pruning.")
-
-
-def optimize_sensor_network(data, model_class, hidden_dim=64, heads=4,
-                            max_error_increase=0.10, metric='mae', num_epochs=1000):  # Added num_epochs back
-    logging.warning("optimize_sensor_network (pruning pipeline) needs significant review/adaptation.")
-    logging.warning("Running basic training instead of pruning.")
-    # Fallback to just training the model without pruning
-    model = train_model(data, model_class, hidden_dim, heads, num_epochs)  # Use the adapted train_model
-    # Return the trained model and the original observed mask
-    optimized_mask = data.observed_mask.clone() if hasattr(data, 'observed_mask') else None  # Or handle error
-    if optimized_mask is None:
-        logging.error("Cannot return optimized_mask as it's missing from data.")
-    return model, optimized_mask
+    return model, training_info

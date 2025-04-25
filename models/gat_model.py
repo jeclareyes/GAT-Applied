@@ -1,96 +1,98 @@
-# models/gat_model.py
+#!/usr/bin/env python3
+"""
+gat_model.py
+
+Definición del modelo TrafficGAT basado en Graph Attention Networks (GAT) adaptado para predecir flujos de tráfico.
+Este modelo toma como entrada características de los nodos, aplica dos capas GAT y utiliza un MLP para predecir el flujo
+de cada enlace del grafo.
+
+La estructura es la siguiente:
+    1. Una primera capa GAT con múltiples cabezas para aprender representaciones intermedias de los nodos.
+    2. Una segunda capa GAT que reduce la dimensionalidad a una única representación por nodo.
+    3. Un MLP que, a partir de la concatenación de las representaciones de los nodos fuente y destino de un enlace,
+       predice el flujo asociado a dicho enlace.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_geometric
 from torch_geometric.nn import GATConv
+
 
 class TrafficGAT(nn.Module):
     """
-    Graph Attention Network (GAT) adapted for ZAT/Intersection Traffic Model.
-
-    Predicts edge flows based on node embeddings learned via graph attention.
-    Assumes node features represent [is_zat, is_int, net_demand].
-    Uses a custom loss function (external) incorporating observed flows,
-    conservation, and ZAT demand constraints.
+    Modelo GAT para predicción de flujos de tráfico.
 
     Args:
-        in_channels (int): Input feature dimension for nodes (should be 3).
-        hidden_dim (int, optional): Hidden layer dimension. Defaults to 16 or 64.
-        heads (int, optional): Number of attention heads in the first GAT layer. Defaults to 2 or 4.
+        in_channels (int): Dimensión de las características de entrada para cada nodo.
+        hidden_dim (int): Dimensión intermedia (y de salida final de la segunda capa GAT).
+        heads (int): Número de cabezas de atención en la primera capa GAT.
     """
 
-    def __init__(self, in_channels=3, hidden_dim=16, heads=2): # Default hidden_dim and heads adjusted
-        super().__init__()
-        # First GAT convolution layer with multiple attention heads
-        # Removed edge_dim, add_self_loops=False remains reasonable
+    def __init__(self, in_channels: int, hidden_dim: int = 16, heads: int = 2) -> None:
+        super(TrafficGAT, self).__init__()
+
+        # Primera capa GAT: con varias cabezas para capturar múltiples relaciones de atención.
         self.conv1 = GATConv(
-            in_channels,
-            hidden_dim,
+            in_channels=in_channels,
+            out_channels=hidden_dim,
             heads=heads,
-            dropout=0.6, # Added dropout like in the example
+            dropout=0.1,
             add_self_loops=False
         )
 
-        # Second GAT convolution layer, outputting final node embeddings
-        # Input dimension is hidden_dim * heads
-        # Output dimension is hidden_dim (can be adjusted)
-        # Heads set to 1 and concat=False for final embedding layer often
+        # Segunda capa GAT: reduce la concatenación de las cabezas a una sola representación.
         self.conv2 = GATConv(
-            hidden_dim * heads,
-            hidden_dim, # Output dimension for node embeddings
+            in_channels=hidden_dim * heads,
+            out_channels=hidden_dim,
             heads=1,
-            concat=False, # Usually False for the last layer before prediction
-            dropout=0.6, # Added dropout
+            concat=False,
+            dropout=0.1,
             add_self_loops=False
         )
 
-        # MLP for predicting edge flow from concatenated node embeddings
-        # Input size is 2 * hidden_dim (from concatenated src and dst node embeddings)
+        # MLP para predecir flujos: utiliza la concatenación de las representaciones de nodo para el enlace.
         self.edge_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim), # Hidden layer in MLP
+            nn.Linear(hidden_dim * 2, hidden_dim),  # Combina las representaciones de los nodos de origen y destino.
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1) # Output layer: predicts 1 value (flow)
+            nn.Linear(hidden_dim, 1)  # Salida: flujo predicho para el enlace.
         )
 
-        # Removed attention_weights storage and related methods for simplicity
-        # Removed the old conservation_loss method
-
-    def forward(self, data):
+    def forward(self, data: torch_geometric.data.Data) -> torch.Tensor:
         """
-        Forward pass of the Graph Attention Network.
+        Realiza el forward pass del modelo.
 
         Args:
-            data (Data): PyTorch Geometric Data object containing x and edge_index.
+            data (torch_geometric.data.Data): Objeto que contiene al menos:
+                - x: Tensor de características de nodo [num_nodes, in_channels].
+                - edge_index: Tensor de topología del grafo [2, num_edges].
 
         Returns:
-            torch.Tensor: Predicted non-negative traffic flows for edges.
+            torch.Tensor: Tensor unidimensional con el flujo predicho para cada enlace [num_edges].
         """
-        # Extract node features and edge topology
         x, edge_index = data.x, data.edge_index
 
-        # Apply first GAT layer
-        # Note: edge_attr=None as we don't use edge features in GATConv here
-        x = F.dropout(x, p=0.6, training=self.training) # Dropout before conv1
-        x = self.conv1(x, edge_index, edge_attr=None)
-        x = F.elu(x) # ELU activation after conv1
+        # Aplicar dropout antes de la primera capa para regularización
+        x = F.dropout(x, p=0.6, training=self.training)
+        x = self.conv1(x, edge_index)
+        x = F.elu(x)  # Activación ELU para la salida de la primera capa
 
-        # Apply second GAT layer
-        x = F.dropout(x, p=0.6, training=self.training) # Dropout before conv2
-        x = self.conv2(x, edge_index, edge_attr=None)
-        # No activation needed after conv2 if followed by MLP? Or maybe ReLU/ELU? Let's keep it simple.
-        # x now contains the final node embeddings (shape: [num_nodes, hidden_dim])
+        # Segunda capa GAT con dropout para robustez
+        x = F.dropout(x, p=0.6, training=self.training)
+        x = self.conv2(x, edge_index)
 
-        # Predict edge flows using the MLP
-        edge_src = x[edge_index[0]] # Get embeddings for source nodes of edges
-        edge_dst = x[edge_index[1]] # Get embeddings for destination nodes of edges
+        # Obtener las representaciones de los nodos para cada extremo del enlace
+        edge_src = x[edge_index[0]]  # Nodo fuente
+        edge_dst = x[edge_index[1]]  # Nodo destino
 
-        # Concatenate source and destination node embeddings
-        edge_features_concat = torch.cat([edge_src, edge_dst], dim=-1) # Shape: [num_edges, hidden_dim * 2]
+        # Concatenar las representaciones de los nodos para formar la entrada del MLP
+        edge_features = torch.cat([edge_src, edge_dst], dim=-1)
 
-        # Pass concatenated features through the edge MLP
-        edge_flows = self.edge_mlp(edge_features_concat).squeeze(-1) # Squeeze the last dim (size 1)
+        # Predecir flujo a partir de las características combinadas
+        edge_flow = self.edge_mlp(edge_features).squeeze(-1)
 
-        # Ensure flows are non-negative
-        edge_flows = F.relu(edge_flows)
+        # Asegurar que los flujos sean no negativos (opcional, mediante ReLU)
+        edge_flow = F.relu(edge_flow)
 
-        return edge_flows
+        return edge_flow
