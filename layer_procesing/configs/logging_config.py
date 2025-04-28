@@ -1,7 +1,7 @@
 # config/logging_config.py
 import logging
 import logging.config
-from configs.settings import LOG_FILE
+from settings import Log
 
 LOGGING = {
     'version': 1,
@@ -19,7 +19,7 @@ LOGGING = {
         },
         'file': {
             'class': 'logging.FileHandler',
-            'filename': str(LOG_FILE),
+            'filename': str(Log.LOG_FILE),
             'formatter': 'standard',
             'level': 'DEBUG',
             'encoding': 'utf-8'
