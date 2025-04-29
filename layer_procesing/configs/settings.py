@@ -5,13 +5,23 @@ from pathlib import Path
 
 class Paths:
     BASE_DIR = Path(__file__).resolve().parent.parent
+    try:
+        YAML_FILE = BASE_DIR / "configs/directories.yml"
+        with open(YAML_FILE, "r") as file:
+            directories = yaml.safe_load(file)
+            LASTKAJEN_GEOPACKAGES_DIR = directories["LASTKAJEN_GEOPACKAGES_TO_MERGE"]
+            EMME_GEOPACKAGE_DIR = os.path.join(directories["EMME_GEOPACKAGE_TO_MERGE"] , "emme_links_ready_to_join.gpkg")
+            MOBILE_POLYGONS_GEOPACKAGE_DIR = os.path.join(directories["MOBILE_POLIGONS"] , "mobildatapolygoner_granser.gpkg")
+    except FileNotFoundError:
+        print(f"Se procede sin archivo .yml")
+        LASTKAJEN_GEOPACKAGES_DIR = r"G:\My Drive\MSc\Thesis\ÅDT\Data\Lastkajen\Trafik_Yearly"
+        # Proporcionar valores predeterminados o manejar el error según sea necesario
+    
     DATA_DIR = BASE_DIR / "data"
     INPUT_DIR = DATA_DIR / "input"
     OUTPUT_DIR = DATA_DIR / "output"
     GRAPH_EXPORT_PREFIX = OUTPUT_DIR / "Graph"
-    LASTKAJEN_GEOPACKAGES_DIR = r"G:\My Drive\MSc\Thesis\ÅDT\Data\Lastkajen\Trafik_Yearly"
-    PRELIMINAR_GEOPACKAGES = DATA_DIR / "geopackages"
-    CORRECTED_GEOPACKAGES = DATA_DIR / "geopackages"
+    GEOPACKAGES_DIR = DATA_DIR / "geopackages"
 
     # Crear directorios si no existen
     os.makedirs(INPUT_DIR, exist_ok=True)
@@ -19,7 +29,15 @@ class Paths:
 
 
 class Layer:
-    GPKG_LAYER_NAME = "TRAFIK_DK_O_105_Trafik"
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    try:
+        YAML_FILE = BASE_DIR / "configs/directories.yml"
+        with open(YAML_FILE, "r") as file:
+            directories = yaml.safe_load(file)
+            GPKG_LAYER_NAME = directories["LASTKAJEN_LAYERS_NAME"]
+    except FileNotFoundError:
+        print(f"Se procede sin archivo .yml")
+        GPKG_LAYER_NAME = "TRAFIK_DK_O_105_Trafik"
 
 # Tolerancias y parámetros estándares
 DEFAULT_GEOMETRY_TOLERANCE = 5.0  # en metros
@@ -45,9 +63,10 @@ class Fields:
 
 
 class Pipeline:
-    PHASE_BLEND_LASTKAJEN_GEOPACKAGES = True
+    PHASE_BLEND_LASTKAJEN_GEOPACKAGES = False
+    PHASE_LINK_LASTKAJEN_TO_EMME = True
     PHASE_ANALYZE_BLENDED_LASTKAJEN_GEOPACKAGE = False
-    PHASE_LINK_LASTKAJEN_TO_EMME = False
+
     NODE_MATCH_TOLERANCE = 5.0
     #YEARS_TO_ASSESS = [2020, 2021, 2022]
     YEARS_TO_ASSESS = [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009,
@@ -62,6 +81,9 @@ class Filenames:
     PRELIMINAR_NODES_FILE = 'blended_nodes_from_lastkajen'
     CORRECTED_LINKS_FILE = 'corrected_links_topology'
     CORRECTED_NODES_FILE = 'corrected_links_topology'
+    PRELIMINAR_EMME_LINKS_FILE = 'emme_network_links'
+    JOINED_EMME_LINKS_FILE = 'joined_emme_network_links'
+    JOINED_EMME_NODES_FILE = 'joined_emme_network_nodes'
 
 
 class Regex:

@@ -3,7 +3,7 @@
 import argparse
 import sys
 import logging
-from configs.settings import Paths, Pipeline, Filenames, Regex, Fields
+from configs.settings import Paths, Pipeline, Filenames, Regex, Fields, Layer
 from export_utils import GeoPackageExporter, ReportLogger
 from data_ingestion import GeoPackageHandler
 from network_processing import *
@@ -25,8 +25,8 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
     attr_cons = AttributeConsolidator()
     node_id = NodeIdentifier()
 
-    corrected_links_path = Paths.PRELIMINAR_GEOPACKAGES / Filenames.CORRECTED_LINKS_FILE
-    corrected_nodes_path = Paths.PRELIMINAR_GEOPACKAGES / Filenames.CORRECTED_NODES_FILE
+    corrected_links_path = Paths.GEOPACKAGES_DIR / Filenames.CORRECTED_LINKS_FILE
+    corrected_nodes_path = Paths.GEOPACKAGES_DIR / Filenames.CORRECTED_NODES_FILE
 
 
     if Pipeline.PHASE_BLEND_LASTKAJEN_GEOPACKAGES:
@@ -37,11 +37,13 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         import geopandas as gpd
         gdf_list = []
         for ruta in Path(lastkajen_dir).glob("*.gpkg"):
-            year_match = re.search(Regex.YEAR_REGEX, str(ruta))
-            year = int(year_match.group()) if year_match else None
+            year_match = re.findall(Regex.YEAR_REGEX, str(ruta))[-2]
+            year = int(year_match) if year_match else None
             if year in Pipeline.YEARS_TO_ASSESS:
                 handler = GeoPackageHandler(ruta)
-                gdf = handler.read_layer()
+                gdf = handler.read_layer(layer_name=Layer.GPKG_LAYER_NAME, force_2d=True)
+                clip = GeoPackageHandler(Paths.MOBILE_POLYGONS_GEOPACKAGE_DIR).read_layer(layer_name="mobildatapolygoner_granser")
+                gdf = handler.clip_geopackage(gdf, clip_geom=clip)
                 gdf = gdf.drop(columns=Fields.DROP_FIELDS_LASTKAJEN, inplace=False)
                 gdf = geom_cleaner.clean(gdf)
                 gdf = attr_cons.consolidate(gdf, year)
@@ -57,15 +59,49 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
         gdf_links, gdf_nodes = match_segments(gdf_blend, gdf_nodes, node_tolerance=tolerance)
         years_range = f"{Pipeline.YEARS_TO_ASSESS[0]}_{Pipeline.YEARS_TO_ASSESS[-1]}"
-        exporter = GeoPackageExporter(Paths.PRELIMINAR_GEOPACKAGES / (Filenames.PRELIMINAR_LINKS_FILE + "_" + years_range + ".gpkg"))
+        exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_LINKS_FILE + "_" + years_range + ".gpkg"))
         exporter.export_segments(gdf_links)
-        exporter = GeoPackageExporter(Paths.PRELIMINAR_GEOPACKAGES / (Filenames.PRELIMINAR_NODES_FILE + "_" + years_range + ".gpkg"))
+        exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_NODES_FILE + "_" + years_range + ".gpkg"))
         exporter.export_nodes(gdf_nodes)
         logger.info("GeoPackages preliminares exportados. Corrección manual necesaria.")
         report_logger.export()
         return
 
     if Pipeline.PHASE_LINK_LASTKAJEN_TO_EMME:
+        logger.info("Fase de vinculación a Emme")
+        from pathlib import Path
+        import re
+        import pandas as pd
+        import geopandas as gpd
+
+        years_range = f"{Pipeline.YEARS_TO_ASSESS[0]}_{Pipeline.YEARS_TO_ASSESS[-1]}"
+
+        # Aquí se implementaría la lógica de vinculación a Emme
+        gdf_lastkajen = GeoPackageHandler(Paths.GEOPACKAGES_DIR / "blended_links_from_lastkajen_2000_2024.gpkg").read_layer()
+        gdf_emme = GeoPackageHandler(Paths.EMME_GEOPACKAGE_DIR).read_layer()
+
+        # Se asume que se han creado los GeoPackages corregidos manualmente
+        gdf_all = gpd.GeoDataFrame(pd.concat([gdf_lastkajen, gdf_emme], ignore_index=True))
+        
+        # Esto hay que borrarlo
+        gdf_crudo = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_EMME_LINKS_FILE + years_range + "_crudo.gpkg"))
+        gdf_crudo.export_segments(gdf_all, layer='segmentos_red_crudo')
+        
+        # Inicia proceso de blending
+        gdf_blend = geom_cleaner.blend_duplicates(gdf_all, strategies=strategies)
+        gdf_nodes, orphan = node_id.identify(gdf_blend)
+
+        logger.info(f"Geopackage de segmentos unificado con {len(gdf_blend)} elementos")
+        # Exportar segmentos huérfanos
+        orphan.to_file(f"{output_dir}/segmentos_huerfanos_join_process.gpkg", layer='huerfanos', driver='GPKG')
+        logger.info(f"{len(orphan)} Segmentos huérfanos exportados a {output_dir}/segmentos_huerfanos_join_process.gpkg")
+
+        exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_LINKS_FILE + "_" + years_range + ".gpkg"))
+        exporter.export_segments(gdf_blend)
+        exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_NODES_FILE + "_" + years_range + ".gpkg"))
+        exporter.export_nodes(gdf_nodes)
+        logger.info("GeoPackages joined exportados.")
+        report_logger.export()
         return
 
 

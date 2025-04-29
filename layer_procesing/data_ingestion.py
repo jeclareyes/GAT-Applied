@@ -47,11 +47,23 @@ class GeoPackageHandler:
     def read_layer(self, layer_name=None, force_2d=True):
         layer = layer_name or Layer.GPKG_LAYER_NAME
         if layer not in self.list_layers():
-            raise LayerNotFoundError(layer, self.filepath)
+            layers = self.list_layers()
+            if len(layers) == 1:
+                layer_name = layers[0]
+            else:
+                raise LayerNotFoundError(layer, self.filepath)
         try:
-            gdf = gpd.read_file(str(self.filepath), layer=layer, force_2d=force_2d)
-            logger.info(f"Capa '{layer}' cargada desde {self.filepath}, registros: {len(gdf)}")
+            gdf = gpd.read_file(str(self.filepath), layer=layer_name, force_2d=force_2d)
+            logger.info(f"Capa '{layer_name}' cargada desde {self.filepath}, registros: {len(gdf)}")
             return gdf
+        except Exception as e:
+            raise GeoPackageReadError(self.filepath, e)
+        
+    def clip_geopackage(self, gdf, clip_geom):
+        try:
+            gdf_clipped = gpd.clip(gdf, clip_geom)
+            logger.info(f"Capa recortada con geometría de recorte, registros: {len(clip_geom)}")
+            return gdf_clipped
         except Exception as e:
             raise GeoPackageReadError(self.filepath, e)
 
