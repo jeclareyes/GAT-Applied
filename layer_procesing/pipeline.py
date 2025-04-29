@@ -37,8 +37,8 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         import geopandas as gpd
         gdf_list = []
         for ruta in Path(lastkajen_dir).glob("*.gpkg"):
-            year_match = re.search(Regex.YEAR_REGEX, str(ruta))
-            year = int(year_match.group()) if year_match else None
+            year_match = re.findall(Regex.YEAR_REGEX, str(ruta))[-1]
+            year = int(year_match) if year_match else None
             if year in Pipeline.YEARS_TO_ASSESS:
                 handler = GeoPackageHandler(ruta)
                 gdf = handler.read_layer()
@@ -66,6 +66,8 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         return
 
     if Pipeline.PHASE_LINK_LASTKAJEN_TO_EMME:
+
+        emme_network_dir = Paths.emm
         return
 
 
