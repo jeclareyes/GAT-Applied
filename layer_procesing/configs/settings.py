@@ -2,14 +2,21 @@
 
 import os
 from pathlib import Path
+import yaml
 
 class Paths:
+    
+    __init__ = None  # Evitar la creación de instancias de esta clase
+    with open("configs/directories.yaml", "r") as file:
+        directories = yaml.safe_load(file)
+
     BASE_DIR = Path(__file__).resolve().parent.parent
     DATA_DIR = BASE_DIR / "data"
     INPUT_DIR = DATA_DIR / "input"
     OUTPUT_DIR = DATA_DIR / "output"
     GRAPH_EXPORT_PREFIX = OUTPUT_DIR / "Graph"
-    LASTKAJEN_GEOPACKAGES_DIR = r"G:\My Drive\MSc\Thesis\ÅDT\Data\Lastkajen\Trafik_Yearly"
+    LASTKAJEN_GEOPACKAGES_DIR = r"G:\My Drive\MSc\Thesis\ÅDT\Data\Lastkajen\Trafik_Yearly" or directories["LASTKAJEN_GEOPACKAGES_TO_MERGE"]
+    EMME_GEOPACKAGE_DIR = directories["EMME_GEOPACKAGE_TO_MERGE"]
     PRELIMINAR_GEOPACKAGES = DATA_DIR / "geopackages"
     CORRECTED_GEOPACKAGES = DATA_DIR / "geopackages"
 
@@ -19,7 +26,10 @@ class Paths:
 
 
 class Layer:
-    GPKG_LAYER_NAME = "TRAFIK_DK_O_105_Trafik"
+    __init__ = None  # Evitar la creación de instancias de esta clase
+    with open("configs/directories.yaml", "r") as file:
+        directories = yaml.safe_load(file)
+    GPKG_LAYER_NAME = "TRAFIK_DK_O_105_Trafik" or directories["LASTKAJEN_LAYERS_NAME"]
 
 # Tolerancias y parámetros estándares
 DEFAULT_GEOMETRY_TOLERANCE = 5.0  # en metros
