@@ -3,3 +3,6 @@
 
 /utils/lib/
 /layer_procesing/data/
+/layer_procesing/output/segmentos_huerfanos.gpkg
+/link_predictions.csv
+/evaluation/link_predictions.csv
