@@ -65,3 +65,71 @@ def round_geometry_coords(gdf, precision=6):
         return shape(geo_json)
     gdf['geometry'] = gdf['geometry'].apply(_round_geom)
     return gdf
+
+### --- Funciones de comparación de geometrías ---
+from shapely.geometry.base import BaseGeometry
+from shapely.geometry import LineString, MultiLineString
+from shapely.ops import unary_union, linemerge
+
+def compare_exact(geom1: BaseGeometry, geom2: BaseGeometry) -> tuple[bool, str | None]:
+    if geom1.equals(geom2):
+        return True, 'exact'
+    return False, None
+
+
+def compare_distance(geom1: BaseGeometry, geom2: BaseGeometry, threshold: float) -> tuple[bool, str | None]:
+    if geom1.distance(geom2) <= threshold:
+        return True, 'distance'
+    return False, None
+
+
+def compare_diff(geom1: BaseGeometry, geom2: BaseGeometry, threshold: float) -> tuple[bool, str | None]:
+    if geom1.geom_type in ['LineString', 'MultiLineString'] and geom2.geom_type in ['LineString', 'MultiLineString']:
+        if geom1.symmetric_difference(geom2).length <= threshold:
+            return True, 'diff'
+    return False, None
+
+
+def compare_overlap_ratio(geom1: BaseGeometry, geom2: BaseGeometry, threshold: float) -> tuple[bool, str | None]:
+    if geom1.geom_type in ['LineString', 'MultiLineString'] and geom2.geom_type in ['LineString', 'MultiLineString']:
+        inter = geom1.intersection(geom2)
+        min_len = min(geom1.length, geom2.length)
+        if min_len > 0 and inter.length / min_len >= threshold:
+            return True, 'overlap_ratio'
+    return False, None
+
+
+def compare_buffer_overlap(geom1: BaseGeometry, geom2: BaseGeometry, buffer_amount: float) -> tuple[bool, str | None]:
+    buf = geom1.buffer(buffer_amount)
+    if buf.intersects(geom2):
+        inter_len = buf.intersection(geom2).length
+        if geom2.length > 0 and inter_len / geom2.length >= 0.8:
+            return True, 'buffer_overlap'
+    return False, None
+
+
+def compare_bibuffer_overlap(geom1: BaseGeometry, geom2: BaseGeometry, buffer_amount: float, threshold: float = 0.8) -> tuple[bool, str | None]:
+    buf1 = geom1.buffer(buffer_amount)
+    buf2 = geom2.buffer(buffer_amount)
+    overlap1 = buf1.intersection(geom2).length / geom2.length if geom2.length > 0 else 0
+    overlap2 = buf2.intersection(geom1).length / geom1.length if geom1.length > 0 else 0
+    if max(overlap1, overlap2) >= threshold:
+        return True, 'bibuffer_overlap'
+    return False, None
+
+
+def compare_similarity_index(geom1: BaseGeometry, geom2: BaseGeometry, buffer_amount: float = 50.0, threshold: float = 0.7) -> tuple[bool, str | None]:
+    buf1 = geom1.buffer(buffer_amount)
+    buf2 = geom2.buffer(buffer_amount)
+    inter_len = buf1.intersection(buf2).length
+    total = geom1.length + geom2.length
+    similarity = (2*inter_len)/total if total>0 else 0
+    similarity = min(1.0, similarity)
+    if similarity >= threshold:
+        return True, 'similarity_index'
+    return False, None
+
+
+
+
+

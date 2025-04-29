@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import yaml
 
 class Paths:
     BASE_DIR = Path(__file__).resolve().parent.parent

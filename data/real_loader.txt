@@ -1,0 +1,68 @@
+# Lastkajen
+# Telia OD csv
+# Real Network
+
+"""
+    Carga datos de tráfico desde un archivo pickle y construye un objeto Data de PyTorch Geometric.
+
+    El archivo pickle debe contener un diccionario con claves 'nodes' y 'links' que incluyen:
+      - nodes: 'node.ids', 'node.type', 'node.coordinates', 'node.demand'
+      - links: 'link.ids', 'link.type', 'link.ij', 'link.observed_flow'
+
+    Se buscan el archivo en múltiples rutas si es necesario.
+
+    Args:
+        pickle_name (str): Ruta relativa del archivo pickle (p.ej., "data/traffic_data_10.pkl").
+
+    Returns:
+        Data: Objeto PyTorch Geometric con atributos:
+            - x: tensor de características [num_nodes, 4] (ej. [is_zat, is_intersection, gen, attr]).
+            - edge_index: tensor de aristas [2, num_edges].
+            - observed_flow_indices, observed_flow_values: tensores para flujos observados.
+            - node_coordinates: lista de coordenadas para visualización.
+            - node_types: lista de tipos de nodo.
+            - zat_demands: diccionario con demandas de nodos ZAT.
+            - node_id_map_rev: mapeo índice -> ID de nodo.
+            - node_id_to_index: mapeo ID -> índice.
+            - link_types: lista de tipos de enlace.
+            - in_edges_idx_tonode, out_edges_idx_tonode: listas con índices de aristas entrantes/salientes por nodo.
+    Raises:
+        FileNotFoundError: Si no se encuentra el archivo pickle.
+    """
+
+
+x = 
+[
+    is zat, is_virtual_zat, is_intersection, is_virtual_intersection, gen, attr
+]
+
+edge_index = 
+[
+    [i1, i2,...],
+    [j1, j2,...]
+]
+
+observed_flow = 
+[
+    1, 2, 10, 40,...
+]
+
+node_coordinates =
+[
+    (xi, yi) or [[x1, x2],[y1, y2]]
+]
+
+node_types = {
+    is zat: [1, 3,...],
+    is_virtual_zat: [2, 4,...],
+    is_intersection: [6, 10,...],
+    is_virtual_intersection: [5, 7, 8,...]}
+
+zat_demands = [(1, 20, 50), (2, 50, 20)]
+
+link_types = {
+    is_logic: [1, 3,...],
+    is_virtual: [2, 4,...],
+    is_road: [6, 10,...]}
+
+

@@ -1,38 +1,72 @@
-# network_processing.py: fusión de geometry.py, attributes.py, matching.py, nodes.py y topology_updater.py
+# geometry_processing.py: contiene las clases GeometryCleaner y LayerMerger
+
 
 import geopandas as gpd
 import pandas as pd
 import logging
-from shapely.geometry import base, LineString, MultiLineString, Point
+from shapely.geometry import base, LineString, Point
 from shapely.geometry.base import BaseMultipartGeometry
-from shapely.ops import unary_union, linemerge
-from project_utils import find_best_match
+from shapely.ops import unary_union
+from project_utils import (
+    compare_exact, compare_distance, compare_diff,
+    compare_overlap_ratio, compare_buffer_overlap,
+    compare_bibuffer_overlap, compare_similarity_index
+)
+
 
 logger = logging.getLogger(__name__)
 
 
 class GeometryCleaner:
     """
-    Clase para validar, corregir, opcionalmente simplificar y fusionar geometrías
-    contenidas en un GeoDataFrame.
-
-    Funciones principales:
-      - Remover geometrías nulas o vacías.
-      - Corregir geometrías inválidas usando buffer(0).
-      - Simplificar geometrías con un nivel de tolerancia dado (funcionalidad no implementada
-        en este fragmento, pero la estructura lo permite).
-      - Fusionar geometrías duplicadas o similares basándose en múltiples estrategias.
-      - Descomponer geometrías multipart resultantes de la fusión.
-      - Registrar cambios y errores mediante logging.
+    Limpieza y fusión intra-layer utilizando estrategias de comparación.
     """
+    def __init__(self, thresholds=None):
+        # Umbrales por defecto
+        self.thresholds = thresholds or {
+            'distance': 5.0,
+            'diff': 5.0,
+            'overlap_ratio': 0.5,
+            'buffer_overlap': 50.0,
+            'bibuffer_overlap': 50.0,
+            'bibuffer_overlap_threshold': 0.8,
+            'similarity_index_buffer': 50.0,
+            'similarity_index_threshold': 0.7
+        }
 
-    def __init__(self):
+    def _decompose_and_linemerge(self, merged_geom: base.BaseGeometry) -> list[base.BaseGeometry]:
         """
-        Inicializa el limpiador de geometrías.
+        Descompone una geometría (posiblemente multipart) en geometrías simples.
+        Si la geometría es un MultiLineString, intenta fusionar las partes
+        en LineStrings más largos usando linemerge antes de descomponer.
         """
-        # Puedes añadir parámetros de inicialización aquí si son necesarios
-        # para toda la clase, como una tolerancia general o un logger específico.
-        pass
+        geometries = []
+        if isinstance(merged_geom, BaseMultipartGeometry):
+            # Si es un MultiLineString, intenta fusionar partes conectadas
+            if isinstance(merged_geom, MultiLineString):
+                try:
+                    # linemerge puede retornar un LineString o un MultiLineString
+                    merged_lines = linemerge(merged_geom)
+                    if isinstance(merged_lines, BaseMultipartGeometry):
+                        # Si linemerge todavía resulta en multipart, añadir las partes
+                        geometries.extend(list(merged_lines.geoms))
+                    else:
+                        # Si linemerge resulta en un LineString simple, añadirlo
+                        geometries.append(merged_lines)
+                    logger.debug("MultiLineString procesado con linemerge.")
+                except Exception as e:
+                    # Si linemerge falla por alguna razón, descomponer directamente
+                    logger.warning(f"linemerge falló: {e}. Descomponiendo MultiLineString directamente.")
+                    geometries.extend(list(merged_geom.geoms))
+            else:
+                # Para otros tipos multipart (MultiPolygon, MultiPoint), descomponer directamente
+                geometries.extend(list(merged_geom.geoms))
+        else:
+            # Si ya es una geometría simple, añadirla directamente
+            geometries.append(merged_geom)
+
+        # Filtrar geometrías nulas o vacías que puedan haber resultado de las operaciones
+        return [geom for geom in geometries if geom is not None and not geom.is_empty]
 
     def clean(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """
@@ -100,229 +134,152 @@ class GeometryCleaner:
             f"Proceso de limpieza completado. Filas iniciales: {initial_rows}, Filas finales: {len(gdf_cleaned)}")
         return gdf_cleaned  # Retornamos el GeoDataFrame limpio
 
-    def _compare_ids(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry,
-                     row1: pd.Series, row2: pd.Series) -> tuple[bool, str | None]:
-        """
-        Compara no sólo geometrías sino también valores de columnas 'Avsnittsidentitet', 'seq' y 'longitud'.
-        """
-        if (row1.get('SEQ_NO') == row2.get('SEQ_NO') and
-            row1.get('DIRECTION') == row2.get('DIRECTION') and
-            row1.get('ROLE') == row2.get('ROLE') and
-            abs(row1.get('EXTENT_LENGTH') - row2.get('EXTENT_LENGTH')) < 5.0):
-            return True, 'id_match'
-        return False, None
-
-    def _compare_exact(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry) -> tuple[bool, str | None]:
-        """Compara si dos geometrías son exactamente iguales."""
-        if geom1.equals(geom2):
-            return True, "exact"
-        return False, None
-
-    def _compare_distance(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry, threshold: float) -> tuple[
-        bool, str | None]:
-        """Compara si la distancia entre dos geometrías es menor o igual al umbral."""
-        if geom1.distance(geom2) <= threshold:
-            return True, "distance"
-        return False, None
-
-    def _compare_diff(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry, threshold: float) -> tuple[
-        bool, str | None]:
-        """Compara si la diferencia simétrica entre dos geometrías tiene una longitud menor o igual al umbral."""
-        # Asegurarse de que las geometrías son lineales para calcular la longitud de la diferencia
-        if geom1.geom_type in ['LineString', 'MultiLineString'] and geom2.geom_type in ['LineString',
-                                                                                        'MultiLineString']:
-            if geom1.symmetric_difference(geom2).length <= threshold:
-                return True, "diff"
-        # Considerar otras tipos de geometría si es necesario, adaptando la métrica de comparación
-        # Por ahora, solo aplica a líneas.
-        return False, None
-
-    def _compare_overlap_ratio(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry, threshold: float) -> tuple[
-        bool, str | None]:
-        """Compara si la relación de solapamiento (intersección / longitud mínima) es mayor o igual al umbral."""
-        # Esta estrategia es más adecuada para líneas o polígonos
-        if geom1.geom_type in ['LineString', 'MultiLineString'] and geom2.geom_type in ['LineString',
-                                                                                        'MultiLineString']:
-            inter = geom1.intersection(geom2)
-            min_len = min(geom1.length, geom2.length)
-            # Evitar división por cero
-            if min_len > 0 and inter.length / min_len >= threshold:
-                return True, "overlap_ratio"
-        # Puedes añadir lógica para polígonos usando área si es necesario
-        return False, None
-
-    def _compare_buffer_overlap(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry, buffer_amount: float) -> \
-    tuple[bool, str | None]:
-        """Compara si la geometría 2 intersecta significativamente el buffer de la geometría 1."""
-        # Esta estrategia es útil para encontrar geometrías cercanas o parcialmente solapadas.
-        # Se asume que un solapamiento del 80% de la longitud de geom2 con el buffer de geom1
-        # indica similitud. Este umbral (0.8) puede ser otro parámetro si se desea.
-        buf = geom1.buffer(buffer_amount)
-        if buf.intersects(geom2):
-            # Calcular la longitud de la intersección del buffer con geom2
-            inter_len = buf.intersection(geom2).length
-            # Evitar división por cero
-            if geom2.length > 0 and inter_len / geom2.length >= 0.8:
-                return True, "buffer_overlap"
-        return False, None
-
-    def _compare_bibuffer_overlap(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry,
-                                  buffer_amount: float = 50.0, threshold: float = 0.7) -> tuple[bool, str | None]:
-        """Compara solapamiento mutuo de buffers en ambas direcciones."""
-        buffer_amount = 50.0
-        buf1 = geom1.buffer(buffer_amount)
-        buf2 = geom2.buffer(buffer_amount)
-        overlap1 = buf1.intersection(geom2).length / geom2.length if geom2.length > 0 else 0
-        overlap2 = buf2.intersection(geom1).length / geom1.length if geom1.length > 0 else 0
-        return (True, "bibuffer_overlap") if max(overlap1, overlap2) >= threshold else (False, None)
-
-
-    def _similarity_index(self, geom1: base.BaseGeometry, geom2: base.BaseGeometry,
-                          buffer_amount: float = 50.0, threshold: float = 0.7) -> tuple[bool, str | None]:
-        """Índice de similitud basado en intersección de buffers."""
-        buffer_amount = 50.0
-        buf1 = geom1.buffer(buffer_amount)
-        buf2 = geom2.buffer(buffer_amount)
-        inter_len = buf1.intersection(buf2).length
-        total_len = geom1.length + geom2.length
-        similarity = (2 * inter_len) / total_len if total_len > 0 else 0
-        similarity = min(1.0, similarity)
-        return (True, "similarity_index") if similarity >= threshold else (False, None)
-
-    def _decompose_and_linemerge(self, merged_geom: base.BaseGeometry) -> list[base.BaseGeometry]:
-        """
-        Descompone una geometría (posiblemente multipart) en geometrías simples.
-        Si la geometría es un MultiLineString, intenta fusionar las partes
-        en LineStrings más largos usando linemerge antes de descomponer.
-        """
-        geometries = []
-        if isinstance(merged_geom, BaseMultipartGeometry):
-            # Si es un MultiLineString, intenta fusionar partes conectadas
-            if isinstance(merged_geom, MultiLineString):
-                try:
-                    # linemerge puede retornar un LineString o un MultiLineString
-                    merged_lines = linemerge(merged_geom)
-                    if isinstance(merged_lines, BaseMultipartGeometry):
-                        # Si linemerge todavía resulta en multipart, añadir las partes
-                        geometries.extend(list(merged_lines.geoms))
-                    else:
-                        # Si linemerge resulta en un LineString simple, añadirlo
-                        geometries.append(merged_lines)
-                    logger.debug("MultiLineString procesado con linemerge.")
-                except Exception as e:
-                    # Si linemerge falla por alguna razón, descomponer directamente
-                    logger.warning(f"linemerge falló: {e}. Descomponiendo MultiLineString directamente.")
-                    geometries.extend(list(merged_geom.geoms))
-            else:
-                # Para otros tipos multipart (MultiPolygon, MultiPoint), descomponer directamente
-                geometries.extend(list(merged_geom.geoms))
-        else:
-            # Si ya es una geometría simple, añadirla directamente
-            geometries.append(merged_geom)
-
-        # Filtrar geometrías nulas o vacías que puedan haber resultado de las operaciones
-        return [geom for geom in geometries if geom is not None and not geom.is_empty]
-
-    def blend_duplicates(self, gdf, id_col="Avsnittsidentitet",
-                         strategies=None, thresholds=None) -> gpd.GeoDataFrame:
-        if strategies is None:
-            strategies = ["exact", "distance", "diff", "overlap_ratio", "buffer_overlap", "bibuffer_overlap",
-                          "similarity_index"]
-        if thresholds is None:
-            thresholds = {
-                "distance": 5.0,
-                "diff": 5.0,
-                "overlap_ratio": 0.5,
-                "buffer_overlap": 50.0,
-                "bibuffer_overlap": 50.0,  # meters
-                "bibuffer_overlap_threshold": 0.7,  # percentage
-                "similarity_index": 50.0,
-                "similarity_index_threshold": 0.7,
-            }
-            logger.info(f"Usando umbrales por defecto: {thresholds}")
-        else:
-            logger.info(f"Usando umbrales proporcionados: {thresholds}")
-
-        # Mapa de estrategia a método, sin lambdas extrañas
+    def blend_duplicates(self, gdf: gpd.GeoDataFrame, id_col='Avsnittsidentitet',
+                         strategies=None) -> gpd.GeoDataFrame:
+        # Configura estrategias
+        strategies = strategies or [
+            'exact', 'distance', 'diff', 'overlap_ratio',
+            'buffer_overlap', 'bibuffer_overlap', 'similarity_index'
+        ]
+        # Mapa de funciones
         strategy_map = {
-             "id_match": lambda g1, g2, r1, r2: self._compare_ids(g1, g2, r1, r2),
-             "exact": self._compare_exact,
-             "distance": lambda g1, g2: self._compare_distance(g1, g2, thresholds["distance"]),
-             "diff": lambda g1, g2: self._compare_diff(g1, g2, thresholds["diff"]),
-             "overlap_ratio": lambda g1, g2: self._compare_overlap_ratio(g1, g2, thresholds["overlap_ratio"]),
-             "buffer_overlap": lambda g1, g2: self._compare_buffer_overlap(g1, g2, thresholds["buffer_overlap"]),
-             "bibuffer_overlap": lambda g1, g2: self._compare_bibuffer_overlap(g1, g2, thresholds["bibuffer_overlap"], thresholds.get("bibuffer_overlap_threshold")),
-             "similarity_index": lambda g1, g2: self._similarity_index(g1, g2, thresholds.get("similarity_index_buffer"), thresholds.get("similarity_index_threshold"))
-             }
+            'exact': compare_exact,
+            'distance': lambda g1,g2: compare_distance(g1,g2,self.thresholds['distance']),
+            'diff': lambda g1,g2: compare_diff(g1,g2,self.thresholds['diff']),
+            'overlap_ratio': lambda g1,g2: compare_overlap_ratio(g1,g2,self.thresholds['overlap_ratio']),
+            'buffer_overlap': lambda g1,g2: compare_buffer_overlap(g1,g2,self.thresholds['buffer_overlap']),
+            'bibuffer_overlap': lambda g1,g2: compare_bibuffer_overlap(
+                g1,g2,self.thresholds['bibuffer_overlap'], self.thresholds['bibuffer_overlap_threshold']
+            ),
+            'similarity_index': lambda g1,g2: compare_similarity_index(
+                g1,g2,self.thresholds['similarity_index_buffer'], self.thresholds['similarity_index_threshold']
+            )
+        }
 
-        # Lista para guardar los resultados finales
         merged = []
-
-        # 1. Agrupamos el GeoDataFrame por la columna que define el grupo (por ejemplo, 'ELEMENT_ID')
         for eid, group in gdf.groupby(id_col):
-
-            # 2. Inicializamos un marcador para saber qué filas ya hemos usado en fusiones
-            used = [False] * len(group)
-
-            # 3. Reseteamos el índice del grupo para trabajar con índices ordenados (0, 1, 2, ...)
             rows = group.reset_index(drop=True)
-
-            # 4. Recorremos cada fila en el grupo
-            for i, row in rows.iterrows():
-                if used[i]:
-                    continue  # Si esta fila ya se usó en otra fusión, la saltamos
-
-                # 5. Inicializamos un nuevo grupo de fusión
-                current = row.geometry  # Geometría de referencia
-                used[i] = True  # Marcamos que ya estamos usando esta fila
-                merged_indices = [i]  # Lista de índices que serán fusionados
-                sim_strategy = "None"  # Estrategia usada para fusionar (por ahora ninguna)
-
-                # 6. Buscamos otras filas dentro del mismo grupo que puedan fusionarse
-                for j, other in rows.iterrows():
-                    if used[j]:
-                        continue  # Si esta fila ya se usó, la saltamos
-
-                    # 7. Probamos todas las estrategias de similitud en orden
+            used = [False]*len(rows)
+            for i,row in rows.iterrows():
+                if used[i]: continue
+                used[i]=True
+                current = row.geometry
+                merged_idx=[i]
+                strat_used='None'
+                for j,other in rows.iterrows():
+                    if used[j]: continue
                     for strat in strategies:
-                        match, name = (
-                            strategy_map[strat](row.geometry, other.geometry, row, other)
-                            if strat == 'id_match'
-                            else strategy_map[strat](row.geometry, other.geometry)
-                        )
-
+                        match,name = strategy_map[strat](current, other.geometry)
                         if match:
-                            # Si hay match según esta estrategia:
-                            sim_strategy = name or strat  # Guardamos el nombre de la estrategia usada
-                            merged_indices.append(j)  # Agregamos el índice de esta fila para fusionar
-                            used[j] = True  # Marcamos que esta fila ya está usada
-                            break  # No seguimos probando más estrategias para este par
-
-                # 8. Una vez identificadas las filas similares, las fusionamos
-                subset = rows.loc[merged_indices]  # Seleccionamos las filas a fusionar
-                unioned = unary_union(subset.geometry.tolist())  # Fusionamos todas las geometrías en una sola
-
-                # 9. A veces la fusión genera geometrías multipartes (MultiLineString)
-                # Usamos una función para dividirlas en geometrías más simples
-                decomposed_geometries = self._decompose_and_linemerge(unioned)
-
-                # 10. Guardamos cada geometría simple como una nueva fila
-                for simple_geom in decomposed_geometries:
-                    # Para cada columna del subset (excepto 'geometry'), Si al eliminar los NaN de esta columna
-                    # queda algún valor tomamos el primer valor no-NaN encontrado Si no queda ningún valor
-                    # (todos eran NaN), asignamos None
-                    merged_attr = {
-                        col: (subset[col].dropna().iloc[0] if not subset[col].dropna().empty else None)
-                        for col in subset.columns if col != "geometry"
-                    }
-                    # Copiamos los atributos de la primera fila
-                    merged_attr["geometry"] = simple_geom  # Asignamos la nueva geometría
-                    merged_attr[
-                        "Similarity Strategy"] = sim_strategy  # Guardamos la estrategia que se usó para la fusión
-                    merged.append(merged_attr)  # Añadimos esta fila al resultado final
-
+                            strat_used = name
+                            used[j]=True
+                            merged_idx.append(j)
+                            break
+                subset=rows.loc[merged_idx]
+                unioned=unary_union(subset.geometry.tolist())
+                parts = self._decompose_and_linemerge(unioned)
+                for geom in parts:
+                    attr=subset.iloc[0].drop('geometry').to_dict()
+                    attr['geometry']=geom
+                    attr['Similiarity_Strategy']=strat_used
+                    merged.append(attr)
         return gpd.GeoDataFrame(merged, crs=gdf.crs)
 
+class LayerMerger:
+    """
+    Empareja dos layers A y B y transfiere atributos de B a A.
+    """
+    def __init__(self, thresholds: dict = None, strategies: list[str] = None):
+        # Umbrales por defecto
+        self.thresholds = thresholds or {
+            'bibuffer_overlap': 50.0,
+            'bibuffer_overlap_threshold': 0.7,
+            'similarity_index_buffer': 50.0,
+            'similarity_index_threshold': 0.7,
+            'vicinity_search': 500.0
+        }
+        self.strategies = strategies or (
+            [ 'bibuffer_overlap', 'similarity_index' ]) 
+
+    def _match_with_strategies(self, line_a, line_b) -> tuple[bool,str|None]:
+        # Mapa de funciones
+        strategy_map = {
+            'bibuffer_overlap': lambda g1,g2: 
+            compare_bibuffer_overlap(g1,g2,self.thresholds['bibuffer_overlap'], self.thresholds['bibuffer_overlap_threshold']),
+            'similarity_index': lambda g1,g2: 
+            compare_similarity_index(g1,g2,self.thresholds['similarity_index_buffer'], self.thresholds['similarity_index_threshold'])
+            }
+
+        for strat in self.strategies:
+            match, name = strategy_map[strat](line_a, line_b)
+            if match:
+                return True, name
+        return False, None
+    
+
+    def _find_best_match_idx(self, 
+                         row_a: pd.Series, 
+                         gdf_b: gpd.GeoDataFrame) -> tuple[int|None, str|None]: 
+        """ 
+        Usa un buffer igual al umbral de bibuffer para hacer sjoin 
+        y luego aplica las estrategias en ese subconjunto. 
+        Devuelve (best_idx, best_strategy). 
+        """
+        # 1. Crear GeoDataFrame temporal con el buffer de tolerancia 
+        buf = row_a.geometry.buffer(self.thresholds['vicinity_search']) 
+        buf_gdf = gpd.GeoDataFrame(geometry=[buf], crs=gdf_b.crs) 
+    
+        # 2. Spatial join para candidatos cercanos 
+        candidates = ( 
+            gpd.sjoin(gdf_b, buf_gdf, how='inner', predicate='intersects') 
+            .drop(columns=['index_right']) 
+        ) 
+    
+        # 3. Iterar solo esos candidatos 
+        for idx_b, row_b in candidates.iterrows(): 
+            match, strat = self._match_with_strategies(row_a.geometry, row_b.geometry) 
+            if match: 
+                return idx_b, strat 
+    
+        return None, None 
+
+
+    def merge_layers(self, 
+                 gdf_a: gpd.GeoDataFrame, 
+                 gdf_b: gpd.GeoDataFrame, 
+                 attrs_to_transfer: list[str] = None, 
+                 prefix: str = 'Emme_' 
+                ) -> gpd.GeoDataFrame: 
+        """ 
+        Para cada feature de A: 
+        - Busca candidatos en B dentro del buffer. 
+        - Aplica estrategias en orden. 
+        - Copia atributos de B (vectorizado) cuando hay match. 
+        """ 
+        result = gdf_a.copy() 
+        attrs = attrs_to_transfer or [c for c in gdf_b.columns if c != 'geometry'] 
+    
+        # Prepara arrays para vectorizar la asignación 
+        match_idxs = [] 
+        match_strats = [] 
+    
+        # 1. Para cada fila de A, determinar correspondencia 
+        for _, row_a in result.iterrows(): 
+            idx_b, strat = self._find_best_match_idx(row_a, gdf_b) 
+            match_idxs.append(idx_b) 
+            match_strats.append(strat or 'None') 
+    
+        # 2. Transferencia vectorizada de atributos 
+        for attr in attrs: 
+            result[prefix + attr] = [ 
+                (gdf_b.at[idx, attr] if idx is not None else None) 
+                for idx in match_idxs 
+            ] 
+    
+        # 3. Guardar la estrategia usada 
+        result['match_strategy'] = match_strats 
+    
+        return result 
 
 class AttributeConsolidator:
     def __init__(self, temporal_fields=None):
@@ -343,7 +300,6 @@ class AttributeConsolidator:
                 else:
                     logger.warning(f"Campo '{field}' no encontrado para año {year}")
         return gdf
-
 
 class NodeIdentifier:
     def __init__(self, precision=6):
@@ -373,41 +329,4 @@ class NodeIdentifier:
         return gdf_nodes, orphan_segs
 
 
-def match_segments(gdf_links, gdf_nodes, node_tolerance=5.0):
-    links = gdf_links.copy()
-    nodes = gdf_nodes.copy()
-    links['start_node_id'] = None;
-    links['end_node_id'] = None;
-    links['direction_log'] = 0
-    nodes['incoming_links'] = [[] for _ in range(len(nodes))];
-    nodes['outgoing_links'] = [[] for _ in range(len(nodes))]
-    starts = [Point(g.coords[0]) for g in links.geometry if isinstance(g, LineString)]
-    ends = [Point(g.coords[-1]) for g in links.geometry if isinstance(g, LineString)]
-    gdf_s = gpd.GeoDataFrame(geometry=starts, crs=links.crs)
-    gdf_e = gpd.GeoDataFrame(geometry=ends, crs=links.crs)
-    sm = gpd.sjoin_nearest(gdf_s, nodes[['node_id', 'geometry']], how='left', max_distance=node_tolerance)
-    em = gpd.sjoin_nearest(gdf_e, nodes[['node_id', 'geometry']], how='left', max_distance=node_tolerance)
-    links['matched_start_node_id'] = sm['node_id'].values
-    links['matched_end_node_id'] = em['node_id'].values
-    for i, row in links.iterrows():
-        s, e = row['matched_start_node_id'], row['matched_end_node_id']
-        if pd.isna(s) or pd.isna(e): continue
-        role, dirv = row.get('ROLE'), row.get('DIRECTION')
-        d = 0
-        if role == 'Normal':
-            d = 0
-        elif role in ['Syskon fram', 'Syskon bak']:
-            d = 1;
-            s, e = (e, s) if dirv == 'Mot' else (s, e)
-        links.at[i, 'start_node_id'], links.at[i, 'end_node_id'], links.at[i, 'direction_log'] = s, e, d
-        si = nodes[nodes.node_id == s].index[0];
-        ei = nodes[nodes.node_id == e].index[0]
-        if d == 1:
-            nodes.at[si, 'outgoing_links'].append(row['ELEMENT_ID']);
-            nodes.at[ei, 'incoming_links'].append(row['ELEMENT_ID'])
-        else:
-            for idxn in (si, ei):
-                nodes.at[idxn, 'incoming_links'].append(row['ELEMENT_ID']);
-                nodes.at[idxn, 'outgoing_links'].append(row['ELEMENT_ID'])
-    links.drop(columns=['matched_start_node_id', 'matched_end_node_id'], inplace=True)
-    return links, nodes
+

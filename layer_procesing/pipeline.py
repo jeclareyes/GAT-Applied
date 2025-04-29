@@ -81,29 +81,20 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         gdf_emme = GeoPackageHandler(Paths.EMME_GEOPACKAGE_DIR).read_layer()
 
         # Se asume que se han creado los GeoPackages corregidos manualmente
-        gdf_all = gpd.GeoDataFrame(pd.concat([gdf_lastkajen, gdf_emme], ignore_index=True))
+        #gdf_join = gpd.GeoDataFrame(pd.concat([gdf_lastkajen, gdf_emme], ignore_index=True))
         
-        # Esto hay que borrarlo
-        gdf_crudo = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_EMME_LINKS_FILE + years_range + "_crudo.gpkg"))
-        gdf_crudo.export_segments(gdf_all, layer='segmentos_red_crudo')
+        processing_join = LayerMerger()
+        gdf_join = processing_join.merge_layers(gdf_lastkajen, gdf_emme)
         
-        # Inicia proceso de blending
-        gdf_blend = geom_cleaner.blend_duplicates(gdf_all, strategies=strategies)
-        gdf_nodes, orphan = node_id.identify(gdf_blend)
-
-        logger.info(f"Geopackage de segmentos unificado con {len(gdf_blend)} elementos")
-        # Exportar segmentos huérfanos
-        orphan.to_file(f"{output_dir}/segmentos_huerfanos_join_process.gpkg", layer='huerfanos', driver='GPKG')
-        logger.info(f"{len(orphan)} Segmentos huérfanos exportados a {output_dir}/segmentos_huerfanos_join_process.gpkg")
-
         exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_LINKS_FILE + "_" + years_range + ".gpkg"))
-        exporter.export_segments(gdf_blend)
-        exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_NODES_FILE + "_" + years_range + ".gpkg"))
-        exporter.export_nodes(gdf_nodes)
-        logger.info("GeoPackages joined exportados.")
+        exporter.export_segments(gdf_join, layer='joined_emme_network_links')
+        # Esto hay que borrarlo
+        # gdf_crudo = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_EMME_LINKS_FILE + years_range + "_crudo.gpkg"))
+        # gdf_crudo.export_segments(gdf_all, layer='segmentos_red_crudo')
+        
+        # Hasta aqui llevo el pipeline nuevo 
         report_logger.export()
         return
-
 
     if Pipeline.LOAD_CORRECTED_GEOPACKAGES:
         logger.info("Cargando GeoPackages corregidos")
