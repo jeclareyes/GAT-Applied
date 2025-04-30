@@ -64,17 +64,20 @@ class Fields:
 
 
 class Pipeline:
-    PHASE_BLEND_LASTKAJEN_GEOPACKAGES = False
+    PHASE_BLEND_LASTKAJEN_GEOPACKAGES = True
     PHASE_LINK_LASTKAJEN_TO_EMME = True
-    PHASE_ANALYZE_BLENDED_LASTKAJEN_GEOPACKAGE = False
+    PHASE_GRAPH_ANALYSIS = False
+    PHASE_VISUALIZATION = False
+
 
     NODE_MATCH_TOLERANCE = 5.0
     #YEARS_TO_ASSESS = [2020, 2021, 2022]
     YEARS_TO_ASSESS = [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009,
                        2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019,
                        2020, 2021, 2022, 2023, 2024]
-    STRATEGIES = ["id_match", "exact", "bibuffer_overlap", "similarity_index"]
-    #  STRATEGIES = ["exact", "distance", "diff", "overlap_ratio", "buffer_overlap", "bibuffer_overlap", "similarity_index"]
+    # TODO implementar tambien id_match
+    STRATEGIES = ["exact", "bibuffer_overlap", "similarity_index"]
+    #  STRATEGIES_JOIN = ["exact", "distance", "diff", "overlap_ratio", "buffer_overlap", "bibuffer_overlap", "similarity_index"]
 
 
 class Filenames:

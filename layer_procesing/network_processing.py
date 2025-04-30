@@ -4,7 +4,7 @@
 import geopandas as gpd
 import pandas as pd
 import logging
-from shapely.geometry import base, LineString, Point
+from shapely.geometry import base, LineString, Point, MultiLineString
 from shapely.geometry.base import BaseMultipartGeometry
 from shapely.ops import unary_union
 from project_utils import (

@@ -30,7 +30,7 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
 
     if Pipeline.PHASE_BLEND_LASTKAJEN_GEOPACKAGES:
-        logger.info("Procesamiento inicial")
+        logging.info("Pipeline: Procesamiento inicial")
         from pathlib import Path
         import re
         import pandas as pd
@@ -54,21 +54,25 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
         logger.info(f"Geopackage de segmentos unificado con {len(gdf_blend)} elementos")
         # Exportar segmentos huérfanos
-        orphan.to_file(f"{output_dir}/segmentos_huerfanos.gpkg", layer='huerfanos', driver='GPKG')
-        logger.info(f"{len(orphan)} Segmentos huérfanos exportados a {output_dir}/segmentos_huerfanos.gpkg")
+        try:
+            orphan.to_file(f"{output_dir}/segmentos_huerfanos.gpkg", layer='huerfanos', driver='GPKG')
+            logger.info(f"{len(orphan)} Segmentos huérfanos exportados a {output_dir}/segmentos_huerfanos.gpkg")
+        except Exception as e:
+            logger.error(f"Error al exportar segmentos huérfanos: {e}")
 
-        gdf_links, gdf_nodes = match_segments(gdf_blend, gdf_nodes, node_tolerance=tolerance)
+        # TODO implementar match_segments
+        # gdf_links, gdf_nodes = match_segments(gdf_blend, gdf_nodes, node_tolerance=tolerance)
         years_range = f"{Pipeline.YEARS_TO_ASSESS[0]}_{Pipeline.YEARS_TO_ASSESS[-1]}"
         exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_LINKS_FILE + "_" + years_range + ".gpkg"))
-        exporter.export_segments(gdf_links)
+        # TODO should be gdf_links
+        exporter.export_segments(gdf_blend)
         exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_NODES_FILE + "_" + years_range + ".gpkg"))
         exporter.export_nodes(gdf_nodes)
-        logger.info("GeoPackages preliminares exportados. Corrección manual necesaria.")
+        logger.info(f"GeoPackages {Filenames.PRELIMINAR_LINKS_FILE} y {Filenames.PRELIMINAR_NODES_FILE} exportados. Inspeccion manual necesaria.")
         report_logger.export()
-        return
 
     if Pipeline.PHASE_LINK_LASTKAJEN_TO_EMME:
-        logger.info("Fase de vinculación a Emme")
+        logging.info("Pipeline: Union de Lastkajen con red Emme.")
         from pathlib import Path
         import re
         import pandas as pd
@@ -79,38 +83,27 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         # Aquí se implementaría la lógica de vinculación a Emme
         gdf_lastkajen = GeoPackageHandler(Paths.GEOPACKAGES_DIR / "blended_links_from_lastkajen_2000_2024.gpkg").read_layer()
         gdf_emme = GeoPackageHandler(Paths.EMME_GEOPACKAGE_DIR).read_layer()
-
-        # Se asume que se han creado los GeoPackages corregidos manualmente
-        #gdf_join = gpd.GeoDataFrame(pd.concat([gdf_lastkajen, gdf_emme], ignore_index=True))
         
         processing_join = LayerMerger()
         gdf_join = processing_join.merge_layers(gdf_lastkajen, gdf_emme)
         
         exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_LINKS_FILE + "_" + years_range + ".gpkg"))
         exporter.export_segments(gdf_join, layer='joined_emme_network_links')
-        # Esto hay que borrarlo
-        # gdf_crudo = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.PRELIMINAR_EMME_LINKS_FILE + years_range + "_crudo.gpkg"))
-        # gdf_crudo.export_segments(gdf_all, layer='segmentos_red_crudo')
+        logging.info(f"Se ha exportado el Geopackage {Filenames.JOINED_EMME_LINKS_FILE}")
         
-        # Hasta aqui llevo el pipeline nuevo 
         report_logger.export()
-        return
 
-    if Pipeline.LOAD_CORRECTED_GEOPACKAGES:
-        logger.info("Cargando GeoPackages corregidos")
-        gdf_links = GeoPackageHandler(corrected_links_path).read_layer()
-        gdf_nodes = GeoPackageHandler(corrected_nodes_path).read_layer()
-        gdf_nodes = update_node_topology(gdf_links, gdf_nodes)
+    if Pipeline.PHASE_GRAPH_ANALYSIS:
+        # Construcción del grafo y análisis
+        logger.info("Construyendo y exportando grafo")
+        G = GraphBuilder().build(gdf_links, gdf_nodes)
+        GraphExporter(output_dir + "/grafo_vial").export_graphml(G)
+        report = GraphAnalyzer().analyze(G)
 
-    # Construcción del grafo y análisis
-    logger.info("Construyendo y exportando grafo")
-    G = GraphBuilder().build(gdf_links, gdf_nodes)
-    GraphExporter(output_dir + "/grafo_vial").export_graphml(G)
-    report = GraphAnalyzer().analyze(G)
-
-    # Visualización
-    folium_map = FoliumMapBuilder().build([gdf_links.to_crs(epsg=4326), gdf_nodes.to_crs(epsg=4326)])
-    folium_map.save(f"{output_dir}/mapa_interactivo.html")
+    if Pipeline.PHASE_VISUALIZATION:
+        # Visualización
+        folium_map = FoliumMapBuilder().build([gdf_links.to_crs(epsg=4326), gdf_nodes.to_crs(epsg=4326)])
+        folium_map.save(f"{output_dir}/mapa_interactivo.html")
 
     report_logger.export()
     logger.info("Pipeline finalizado")
