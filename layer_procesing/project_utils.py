@@ -129,7 +129,38 @@ def compare_similarity_index(geom1: BaseGeometry, geom2: BaseGeometry, buffer_am
         return True, 'similarity_index'
     return False, None
 
+# NUEVO: Wrapper de estrategias compatible con booleano y score
 
+class StrategyWrapper:
+    def __init__(self, func, buffer_key, threshold_key):
+        self.func = func
+        self.buffer_key = buffer_key
+        self.threshold_key = threshold_key
 
+    def match(self, g1, g2, thresholds):
+        return self.func(
+            g1, g2,
+            thresholds[self.buffer_key],
+            thresholds[self.threshold_key]
+        )
 
+    def score(self, g1, g2, thresholds):
+        match, _ = self.match(g1, g2, thresholds)
+        if not match:
+            return 0.0
+        if self.func.__name__ == 'compare_bibuffer_overlap':
+            buf1 = g1.buffer(thresholds[self.buffer_key])
+            buf2 = g2.buffer(thresholds[self.buffer_key])
+            o1 = buf1.intersection(g2).length / g2.length if g2.length > 0 else 0
+            o2 = buf2.intersection(g1).length / g1.length if g1.length > 0 else 0
+            return max(o1, o2)
+        elif self.func.__name__ == 'compare_similarity_index':
+            buf1 = g1.buffer(thresholds[self.buffer_key])
+            buf2 = g2.buffer(thresholds[self.buffer_key])
+            inter_len = buf1.intersection(buf2).length
+            total = g1.length + g2.length
+            sim = (2 * inter_len) / total if total > 0 else 0
+            return min(1.0, sim)
+        else:
+            return 0.0
 

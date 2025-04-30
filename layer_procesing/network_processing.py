@@ -10,7 +10,7 @@ from shapely.ops import unary_union
 from project_utils import (
     compare_exact, compare_distance, compare_diff,
     compare_overlap_ratio, compare_buffer_overlap,
-    compare_bibuffer_overlap, compare_similarity_index
+    compare_bibuffer_overlap, compare_similarity_index, StrategyWrapper
 )
 
 
@@ -198,88 +198,68 @@ class LayerMerger:
             'similarity_index_threshold': 0.7,
             'vicinity_search': 500.0
         }
-        self.strategies = strategies or (
-            [ 'bibuffer_overlap', 'similarity_index' ]) 
+        self.strategies = strategies or ['bibuffer_overlap', 'similarity_index']
+
+        # Mapear estrategias con wrappers
+        self.strategy_wrappers = {
+            'bibuffer_overlap': StrategyWrapper(compare_bibuffer_overlap, 'bibuffer_overlap', 'bibuffer_overlap_threshold'),
+            'similarity_index': StrategyWrapper(compare_similarity_index, 'similarity_index_buffer', 'similarity_index_threshold')
+        }
 
     def _match_with_strategies(self, line_a, line_b) -> tuple[bool,str|None]:
-        # Mapa de funciones
-        strategy_map = {
-            'bibuffer_overlap': lambda g1,g2: 
-            compare_bibuffer_overlap(g1,g2,self.thresholds['bibuffer_overlap'], self.thresholds['bibuffer_overlap_threshold']),
-            'similarity_index': lambda g1,g2: 
-            compare_similarity_index(g1,g2,self.thresholds['similarity_index_buffer'], self.thresholds['similarity_index_threshold'])
-            }
-
         for strat in self.strategies:
-            match, name = strategy_map[strat](line_a, line_b)
+            match, name = self.strategy_wrappers[strat].match(line_a, line_b, self.thresholds)
             if match:
                 return True, name
         return False, None
-    
 
-    def _find_best_match_idx(self, 
-                         row_a: pd.Series, 
-                         gdf_b: gpd.GeoDataFrame) -> tuple[int|None, str|None]: 
-        """ 
-        Usa un buffer igual al umbral de bibuffer para hacer sjoin 
-        y luego aplica las estrategias en ese subconjunto. 
-        Devuelve (best_idx, best_strategy). 
-        """
-        # 1. Crear GeoDataFrame temporal con el buffer de tolerancia 
-        buf = row_a.geometry.buffer(self.thresholds['vicinity_search']) 
-        buf_gdf = gpd.GeoDataFrame(geometry=[buf], crs=gdf_b.crs) 
-    
-        # 2. Spatial join para candidatos cercanos 
-        candidates = ( 
-            gpd.sjoin(gdf_b, buf_gdf, how='inner', predicate='intersects') 
-            .drop(columns=['index_right']) 
-        ) 
-    
-        # 3. Iterar solo esos candidatos 
-        for idx_b, row_b in candidates.iterrows(): 
-            match, strat = self._match_with_strategies(row_a.geometry, row_b.geometry) 
-            if match: 
-                return idx_b, strat 
-    
-        return None, None 
+    def _compute_match_score(self, geom1, geom2) -> float:
+        scores = [
+            self.strategy_wrappers[strat].score(geom1, geom2, self.thresholds)
+            for strat in self.strategies
+        ]
+        return sum(scores) / len(scores) if scores else 0.0
 
+    def _find_best_match_idx(self, row_a: pd.Series, gdf_b: gpd.GeoDataFrame) -> tuple[int|None, float]:
+        buf = row_a.geometry.buffer(self.thresholds['vicinity_search'])
+        buf_gdf = gpd.GeoDataFrame(geometry=[buf], crs=gdf_b.crs)
+        candidates = (
+            gpd.sjoin(gdf_b, buf_gdf, how='inner', predicate='intersects')
+            .drop(columns=['index_right'])
+        )
 
-    def merge_layers(self, 
-                 gdf_a: gpd.GeoDataFrame, 
-                 gdf_b: gpd.GeoDataFrame, 
-                 attrs_to_transfer: list[str] = None, 
-                 prefix: str = 'Emme_' 
-                ) -> gpd.GeoDataFrame: 
-        """ 
-        Para cada feature de A: 
-        - Busca candidatos en B dentro del buffer. 
-        - Aplica estrategias en orden. 
-        - Copia atributos de B (vectorizado) cuando hay match. 
-        """ 
-        result = gdf_a.copy() 
-        attrs = attrs_to_transfer or [c for c in gdf_b.columns if c != 'geometry'] 
-    
-        # Prepara arrays para vectorizar la asignación 
-        match_idxs = [] 
-        match_strats = [] 
-    
-        # 1. Para cada fila de A, determinar correspondencia 
-        for _, row_a in result.iterrows(): 
-            idx_b, strat = self._find_best_match_idx(row_a, gdf_b) 
-            match_idxs.append(idx_b) 
-            match_strats.append(strat or 'None') 
-    
-        # 2. Transferencia vectorizada de atributos 
-        for attr in attrs: 
-            result[prefix + attr] = [ 
-                (gdf_b.at[idx, attr] if idx is not None else None) 
-                for idx in match_idxs 
-            ] 
-    
-        # 3. Guardar la estrategia usada 
-        result['match_strategy'] = match_strats 
-    
-        return result 
+        best_idx = None
+        best_score = -1
+
+        for idx_b, row_b in candidates.iterrows():
+            score = self._compute_match_score(row_a.geometry, row_b.geometry)
+            if score > best_score:
+                best_idx = idx_b
+                best_score = score
+
+        return best_idx, best_score if best_score >= 0 else None
+
+    def merge_layers(self, gdf_a: gpd.GeoDataFrame, gdf_b: gpd.GeoDataFrame,
+                     attrs_to_transfer: list[str] = None, prefix: str = 'Emme_') -> gpd.GeoDataFrame:
+        result = gdf_a.copy()
+        attrs = attrs_to_transfer or [c for c in gdf_b.columns if c != 'geometry']
+
+        match_idxs = []
+        match_scores = []
+
+        for _, row_a in result.iterrows():
+            idx_b, score = self._find_best_match_idx(row_a, gdf_b)
+            match_idxs.append(idx_b)
+            match_scores.append(score if score is not None else 0)
+
+        for attr in attrs:
+            result[prefix + attr] = [
+                gdf_b.at[idx, attr] if idx is not None else None
+                for idx in match_idxs
+            ]
+
+        result['match_score'] = match_scores
+        return result
 
 class AttributeConsolidator:
     def __init__(self, temporal_fields=None):
