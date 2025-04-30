@@ -83,10 +83,11 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         # Aquí se implementaría la lógica de vinculación a Emme
         gdf_lastkajen = GeoPackageHandler(Paths.GEOPACKAGES_DIR / "blended_links_from_lastkajen_2000_2024.gpkg").read_layer()
         gdf_emme = GeoPackageHandler(Paths.EMME_GEOPACKAGE_DIR).read_layer()
-        
+
+        # Nuevo: usar LayerMerger que selecciona el match con score más alto
         processing_join = LayerMerger()
         gdf_join = processing_join.merge_layers(gdf_lastkajen, gdf_emme)
-        
+
         exporter = GeoPackageExporter(Paths.GEOPACKAGES_DIR / (Filenames.JOINED_EMME_LINKS_FILE + "_" + years_range + ".gpkg"))
         exporter.export_segments(gdf_join, layer='joined_emme_network_links')
         logging.info(f"Se ha exportado el Geopackage {Filenames.JOINED_EMME_LINKS_FILE}")
