@@ -69,7 +69,8 @@ def custom_loss(predicted_flows, data,
     count_intersections = 0
 
     for node_idx in range(data.num_nodes):
-        if data.node_types[node_idx] == 'intersection':
+        zero_demand_nodes = ['intersection', 'norder_node', 'border node']
+        if data.node_types[node_idx].lower() in zero_demand_nodes:
             in_idx = data.in_edges_idx_tonode[node_idx].to(device)
             out_idx = data.out_edges_idx_tonode[node_idx].to(device)
 
@@ -94,7 +95,8 @@ def custom_loss(predicted_flows, data,
     count_zats = 0
 
     for node_idx in range(data.num_nodes):
-        if data.node_types[node_idx] == 'zat':
+        nodes_with_demand = ['zat', 'taz']
+        if data.node_types[node_idx].lower() in nodes_with_demand:
             node_id = data.node_id_map_rev[node_idx]
             gen_val, attr_val = data.zat_demands.get(node_id, (0.0, 0.0))
             gen_tensor = torch.tensor(gen_val, device=device, dtype=predicted_flows.dtype)

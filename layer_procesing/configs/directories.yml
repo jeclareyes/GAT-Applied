@@ -1,4 +1,5 @@
 LASTKAJEN_GEOPACKAGES_TO_MERGE: C:\Users\SEJC94056\Documents\General Layers\Lastkajen_Layers
-EMME_GEOPACKAGE_TO_MERGE: C:\Users\SEJC94056\Documents\General Layers\Emme_Processed_Layers
+EMME_GEOPACKAGES_TO_JOIN: C:\Users\SEJC94056\Documents\AADT_CodeProject\GAT-Applied\layer_procesing\data\Emme Network\emme_ready_to_join.gpkg
 LASTKAJEN_LAYERS_NAME: TRAFIK_DK_O_105_Trafik
 MOBILE_POLIGONS: C:\Users\SEJC94056\Documents\General Layers\Telia_Layers
+ODM_FILE: C:\Users\SEJC94056\Documents\AADT_CodeProject\GAT-Applied\layer_procesing\data\Mobile Data\odm.csv

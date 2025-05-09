@@ -161,6 +161,7 @@ class HetGATPyG(nn.Module):
                  pred_hidden_dim: int,
                  dropout: float = 0.6) -> None:
         super(HetGATPyG, self).__init__()
+        
         self.preprocess = PreprocessingLayer(node_feat_dim, embed_dim)
         self.v_encoders = nn.ModuleList([
             VEncoderLayerPyG(embed_dim, num_heads, ff_hidden_dim, dropout)

@@ -4,9 +4,11 @@ import re
 import time
 import unicodedata
 import logging
+import pandas as pd
 from difflib import get_close_matches
 import geopandas as gpd
 from shapely.geometry import mapping, shape
+from configs.settings import Pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +34,16 @@ def normalize_text(text):
     text = text.lower().strip()
     return re.sub(r'\s+', ' ', text)
 
-def find_best_match(target, candidates, cutoff=0.6):
-    if not isinstance(target, str) or not candidates.empty:
-        return None
+def find_best_match(target: str, candidates: list[str], cutoff: float = 0.6) -> str | None:
+    """
+    Devuelve el candidato más parecido a 'target' según difflib, o None.
+    """
     norm_target = normalize_text(target)
-    norm_map = {normalize_text(c): c for c in candidates if isinstance(c, str)}
+    norm_map = { normalize_text(c): c for c in candidates if isinstance(c, str) }
     matches = get_close_matches(norm_target, norm_map.keys(), n=1, cutoff=cutoff)
-    return norm_map[matches[0]] if matches else None
+    if matches:
+        return norm_map[matches[0]]
+    return None
 
 # --- Utilidades geográficas ---
 def ensure_crs(gdf, target_crs):
@@ -129,9 +134,9 @@ def compare_similarity_index(geom1: BaseGeometry, geom2: BaseGeometry, buffer_am
         return True, 'similarity_index'
     return False, None
 
-# NUEVO: Wrapper de estrategias compatible con booleano y score
+# Wrapper de estrategias compatible con booleano y score
 
-class StrategyWrapper:
+class StrategyWrapper_old:
     def __init__(self, func, buffer_key, threshold_key):
         self.func = func
         self.buffer_key = buffer_key
@@ -164,3 +169,98 @@ class StrategyWrapper:
         else:
             return 0.0
 
+### --- Funcion joblib para ayudar a encontrar geometrias homologas ---
+
+def _process_group_joblib(group, strategy_map, strategies, id_col, year_col):
+        
+        """
+        Función auxiliar para procesar un grupo de geometrías homólogas.
+        Ejecutada en paralelo por joblib.
+        """
+        import uuid
+        from shapely.ops import unary_union
+
+        rows = group.reset_index(drop=True)
+        used = [False] * len(rows)
+        records = []
+
+        for i, row in rows.iterrows():
+            if used[i]:
+                continue
+            used[i] = True
+            current = row.geometry
+            group_idxs = [i]
+            for j, other in rows.iterrows():
+                if used[j]:
+                    continue
+                for strat in strategies:
+                    match, strat_name = strategy_map[strat](current, other.geometry)
+                    if match:
+                        strat_used = strat_name
+                        used[j] = True
+                        group_idxs.append(j)
+                        current = unary_union([current, other.geometry])
+                        break
+            # asignar blend_id y temporal_sources
+            blend_id = str(uuid.uuid4())
+            years = sorted(rows.loc[group_idxs, year_col].unique().tolist())
+            for idx in group_idxs:
+                rec = rows.loc[idx].drop('geometry').to_dict()
+                rec.update({
+                    'Strategy': strat_used,
+                    'blend_id': blend_id,
+                    'temporal_sources': years,
+                    'geometry': rows.loc[idx].geometry
+                })
+                records.append(rec)
+        return records
+
+
+## Funcion para encontrar todas las columnas a pesar de que solo se haya dado la lista de los prefijos
+
+def find_columns_given_preffixes(df, preffixes):
+    """
+    Encuentra todas las columnas que comienzan con los prefijos dados.
+    """
+    return [col for col in df.columns if any(col.startswith(p) for p in preffixes)]
+
+
+def attribute_processing(df):
+    return
+
+def process_aadt_columns(df):
+    # Extract range of years from Pipeline
+    year_suffixes = [str(year) for year in Pipeline.YEARS_TO_ASSESS]
+
+    # Process each year's columns
+    for year in year_suffixes:
+        # Find all columns with current year suffix
+        year_columns = [col for col in df.columns if col.endswith(f"_{year}")]
+
+        # Key columns expected
+        matars_col = f"Matarsperiod_{year}"
+        matmetod_col = f"Matmetod_{year}"
+
+        if matars_col in df.columns and matmetod_col in df.columns:
+            # Extract first 4 digits from Matarsperiod (as year string)
+            year_in_column = df[matars_col].astype(str).str[:4]
+
+            # Check if year from Matarsperiod matches the column suffix year
+            match_year = year_in_column == year
+
+            # Check if Matmetod is "Stickprovsmätning"
+            valid_method = df[matmetod_col] == "Stickprovsmätning"
+
+            # Rows that satisfy both conditions
+            valid_rows = match_year & valid_method
+
+            # Set all columns with this year suffix to 0 where the row is invalid
+            df.loc[~valid_rows, year_columns] = pd.NA
+
+            # Keep only the year in Matarsperiod for valid rows
+            df.loc[valid_rows, matars_col] = year_in_column[valid_rows].astype(int)
+        else:
+            # If required columns are missing, reset all columns for that year
+            df[year_columns] = 0
+
+    return df

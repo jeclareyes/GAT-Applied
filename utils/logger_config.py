@@ -33,3 +33,8 @@ def setup_logger():
 
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+     # Suppress noisy DEBUG logs from Fiona, Fiona's GDAL env, and GDAL
+    logging.getLogger('fiona').setLevel(logging.WARNING)
+    logging.getLogger('fiona._env').setLevel(logging.WARNING)
+    logging.getLogger('osgeo').setLevel(logging.WARNING)

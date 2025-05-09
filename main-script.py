@@ -21,7 +21,7 @@ from utils.logger_config import setup_logger
 setup_logger()
 
 # Importar funciones de carga y procesamiento de datos
-from data.loader import load_traffic_data_pickle, add_virtual_links, load_traffic_data_dict
+from data.loader import load_traffic_data_pickle, add_virtual_and_logical_links, add_virtual_links, load_traffic_data_dict, load_real_traffic_data
 
 # Importar definiciones de modelos
 from models.gat_model import TrafficGAT
@@ -89,10 +89,10 @@ def main():
     # 0. Carga Manual de Datos
     # ----------------------
 
-    if config.Various.read_pickle is False:
+    """if config.Various.read_pickle is False:
         data = load_traffic_data_dict()
         logging.info("Carga de datos completada exitosamente.")
-
+    """
     # ----------------------
     # 1. Carga de Datos
     # ----------------------
@@ -108,6 +108,15 @@ def main():
                 return
         except Exception as e:
             logging.error(f"Error al cargar datos: {e}", exc_info=True)
+            return
+        
+    if config.Various.read_real_data is True:
+        try:
+            network = config.Directories.input_real_network
+            odm = config.Directories.odm_dir_file
+            data = load_real_traffic_data(network_path=network, odm_path=odm)
+        except Exception as e:
+            logging.error(f"Error al carga data real")
             return
 
     # ----------------------
@@ -133,7 +142,10 @@ def main():
         # Asegurar que se añadan los enlaces virtuales requeridos
         if not hasattr(data, 'virtual_edge_index'):
             logging.info("Agregando enlaces virtuales necesarios para HetGATPyG...")
+            data.virtual_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
             if config.Various.read_pickle is True:
+                data = add_virtual_and_logical_links(data)
+            if config.Various.read_real_data is True:
                 data = add_virtual_links(data)
         if not hasattr(data, 'virtual_edge_index') or data.virtual_edge_index is None:
             logging.error("Error: No se crearon los enlaces virtuales necesarios para HetGATPyG.")

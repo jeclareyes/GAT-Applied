@@ -23,8 +23,158 @@ import pickle
 import torch
 import numpy as np
 import logging
+import fiona
+import pandas as pd
 from torch_geometric.data import Data
+import geopandas as gpd
 
+
+def load_real_traffic_data(network_path, odm_path):
+
+    # --- Se lee la network a Geopandas ---
+
+    # Listar las capas del GeoPackage
+    layers = fiona.listlayers(network_path)
+
+    # Leer las capas y asignarlas por tipo geométrico
+    gdfs = {layer: gpd.read_file(network_path, layer=layer) for layer in layers}
+
+    # Clasificar por tipo de geometría
+    network_nodes = next(gdf for gdf in gdfs.values() if gdf.geometry.geom_type.iloc[0] == 'Point')
+    network_links = next(gdf for gdf in gdfs.values() if gdf.geometry.geom_type.iloc[0] in ['LineString', 'MultiLineString'])
+
+    # --- Se lee matriz ODM
+
+    odm = pd.read_csv(odm_path, encoding='utf-8', sep=';')
+    x = 1
+
+    # --- Comienza la estructuracion del formato
+
+    # reindexado
+    # 1. Normalizar tipos como string para evitar errores de coincidencia
+    network_nodes['ID'] = network_nodes['ID'].astype(str)
+    network_links['INODE'] = network_links['INODE'].astype(str)
+    network_links['JNODE'] = network_links['JNODE'].astype(str)
+
+    # 2. Crear diccionario de mapeo
+    id_mapping = {old_id: new_id for new_id, old_id in enumerate(network_nodes['ID'].unique())}
+
+    # 3. Verificar IDs no encontrados
+    inodes_unmapped = set(network_links['INODE'].unique()) - set(id_mapping.keys())
+    jnodes_unmapped = set(network_links['JNODE'].unique()) - set(id_mapping.keys())
+
+    if inodes_unmapped or jnodes_unmapped:
+        print("⚠️ Advertencia: Hay IDs en los enlaces que no existen en los nodos.")
+        if inodes_unmapped:
+            print(f"  INODE IDs no encontrados: {sorted(inodes_unmapped)}")
+        if jnodes_unmapped:
+            print(f"  JNODE IDs no encontrados: {sorted(jnodes_unmapped)}")
+
+    # 4. Aplicar el mapeo
+    network_nodes['new_id'] = network_nodes['ID'].map(id_mapping)
+    network_links['INODE'] = network_links['INODE'].map(id_mapping)
+    network_links['JNODE'] = network_links['JNODE'].map(id_mapping)
+
+
+    # Asignacion de nuevo indexado
+
+    network_nodes.set_index('ID')
+    network_links.set_index(['INODE', 'JNODE'])
+    node_ids = network_nodes.index
+    link_ids = network_links.index
+
+    # Tipos
+    node_types_list = network_nodes['node_type']
+    link_types_list = network_links['edge_type']
+    node_coords_list = network_nodes[['X', 'Y']]
+    node_demands_list = list(network_nodes[['salidas', 'entradas']].fillna(0).astype(int).itertuples(index=False, name=None))
+
+    # IDs informativos
+    num_nodes = len(node_ids)
+    node_id_to_index = {nid: i for i, nid in enumerate(node_ids)}
+    node_id_map_rev = {i: nid for nid, i in node_id_to_index.items()}
+    
+    # Demand
+    zat_demands = network_nodes[network_nodes['node_type'] == 'TAZ'][['salidas', 'entradas']] \
+                .apply(lambda row: [row['salidas'], row['entradas']], axis=1) \
+                .to_dict()
+
+    # Coordinates
+    node_positions = network_nodes[['X', 'Y']] \
+        .apply(lambda row: [row['X'], row['Y']], axis=1) \
+        .to_dict()
+    
+    # Anadir flujos observados. 
+    years = 2022
+    # TODO implementar la posibilidad de elegir todo, latt, medel, tunga.
+    observed_flows = network_links[f'Adt_samtliga_fordon_{years}'].dropna()
+    # observed_flows = network_links[[f'Adt_samtliga_fordon_{years}',f'Adt_tunga_fordon_{years}']].dropna()
+    observed_flows_indices = torch.tensor(observed_flows.index, dtype=torch.long)
+    observed_flows_values = torch.tensor(observed_flows.values, dtype=torch.float)
+    
+    # --- Construir el objeto Data ---
+    data = Data()
+    # Atributos de nodos y enlaces
+    data.x = torch.tensor(node_demands_list, dtype=torch.float)
+    data.edge_index = torch.tensor(network_links[['INODE', 'JNODE']].values.T, dtype=torch.int32)
+    data.pos = torch.tensor(node_coords_list.values, dtype=torch.float)
+    
+    data.node_types = node_types_list
+    data.node_coordinates = node_positions
+    data.zat_demands = zat_demands
+    data.node_id_map_rev = node_id_map_rev
+    data.node_id_to_index = node_id_to_index
+    data.num_nodes = num_nodes
+    data.link_types = link_types_list
+    data.observed_flow_indices = observed_flows_indices
+    data.observed_flow_values = observed_flows_values
+
+    def verificar_tensor(nombre, tensor, debe_ser_entero=False, permitir_float_enteros=False, permitir_cero=True):
+        #print(f"\n🔍 Verificando tensor '{nombre}'")
+
+        if not isinstance(tensor, torch.Tensor):
+            print("❌ No es un tensor.")
+            return
+
+        # 1. Verificar NaNs
+        if tensor.is_floating_point() and torch.isnan(tensor).any():
+            print("❌ Contiene NaN.")
+            return
+
+        # 2. Verificar tipo de dato
+        if debe_ser_entero:
+            if tensor.dtype not in (torch.int8, torch.int16, torch.int32, torch.int64):
+                print("❌ No es de tipo entero.")
+                return
+        elif permitir_float_enteros and tensor.is_floating_point():
+            if not torch.all(torch.frac(tensor) == 0):
+                print("❌ Contiene valores flotantes no enteros.")
+                return
+
+        # 3. Verificar valores negativos
+        if (tensor < 0).any():
+            print("❌ Contiene valores negativos.")
+            return
+
+        # 4. Verificar valores positivos
+        if not permitir_cero and (tensor <= 0).any():
+            print("❌ Contiene ceros o valores negativos (se requieren positivos estrictos).")
+            return
+        elif permitir_cero and (tensor < 0).any():
+            print("❌ Contiene valores negativos (cero permitido).")
+            return
+
+        print("✅ OK - Sin NaN, tipo correcto, sin negativos, y valores positivos.")
+
+
+    # Aplicar a tus tensores (ajustando si cero es aceptable o no)
+    verificar_tensor("data.x", data.x, debe_ser_entero=False, permitir_float_enteros=True, permitir_cero=True)
+    verificar_tensor("data.edge_index", data.edge_index, debe_ser_entero=True, permitir_cero=True)
+    verificar_tensor("data.pos", data.pos, debe_ser_entero=False, permitir_float_enteros=False, permitir_cero=False)
+
+    data = _build_edge_mappings(data)
+
+    return data
 
 def load_traffic_data_pickle(pickle_name: str) -> Data:
     """
@@ -218,8 +368,44 @@ def _build_edge_mappings(data: Data) -> Data:
     data.out_edges_idx_tonode = out_edges_tensors
     return data
 
-
 def add_virtual_links(data: Data) -> Data:
+    """
+    Crea enlaces virtuales entre todos los nodos tipo TAZ o AUX (insensible a mayúsculas).
+    Se crean enlaces en ambas direcciones entre cada par de estos nodos.
+
+    Si ya existe el atributo virtual_edge_index, se retorna el objeto Data sin cambios.
+
+    Args:
+        data (Data): Objeto PyTorch Geometric que debe incluir:
+            - node_types: lista con el tipo de cada nodo (e.g., 'zat', 'AUX', etc.)
+
+    Returns:
+        Data: Objeto Data actualizado con el atributo virtual_edge_index (tensor [2, num_virtual_edges]).
+    """
+    if hasattr(data, 'virtual_edge_index') and data.virtual_edge_index is not None and not data.virtual_edge_index.numel() == 0:
+        return data
+
+    taz_aux_indices = [
+        idx for idx, ntype in enumerate(data.node_types)
+        if ntype.lower() in ['zat', 'taz', 'aux']
+    ]
+
+    virtual_edges = []
+    for i in range(len(taz_aux_indices)):
+        for j in range(len(taz_aux_indices)):
+            if i != j:
+                src = taz_aux_indices[i]
+                dst = taz_aux_indices[j]
+                virtual_edges.append((src, dst))
+
+    if virtual_edges:
+        data.virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t().contiguous()
+    else:
+        data.virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
+
+    return data
+
+def add_virtual_and_logical_links(data: Data) -> Data:
     """
     Agrega enlaces virtuales al objeto Data para ser usados en modelos que requieren información
     de conectividad adicional, como HetGATPyG. Este ejemplo conecta cada nodo ZAT con la intersección
@@ -260,13 +446,6 @@ def add_virtual_links(data: Data) -> Data:
     else:
         data.virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
     return data
-
-"""'x': [
-            # is_zat, is_int, gen, attr
-            [1.0, 0.0, 1000, 0],
-            [1.0, 0.0, 0, 1000],
-            [0.0, 1.0, 0.0, 0.0]
-        ],"""
 
 def load_traffic_data_dict():
     # Definición del diccionario con todos los datos
