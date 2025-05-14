@@ -4,6 +4,7 @@ import re
 import time
 import unicodedata
 import logging
+import pickle
 import pandas as pd
 from difflib import get_close_matches
 import geopandas as gpd
@@ -232,6 +233,8 @@ def process_aadt_columns(df):
     # Extract range of years from Pipeline
     year_suffixes = [str(year) for year in Pipeline.YEARS_TO_ASSESS]
 
+    exclude_aadt_measurements = []
+
     # Process each year's columns
     for year in year_suffixes:
         # Find all columns with current year suffix
@@ -240,6 +243,9 @@ def process_aadt_columns(df):
         # Key columns expected
         matars_col = f"Matarsperiod_{year}"
         matmetod_col = f"Matmetod_{year}"
+
+        exclude_aadt_measurements.append(matars_col)
+        exclude_aadt_measurements.append(matmetod_col)
 
         if matars_col in df.columns and matmetod_col in df.columns:
             # Extract first 4 digits from Matarsperiod (as year string)
@@ -263,4 +269,86 @@ def process_aadt_columns(df):
             # If required columns are missing, reset all columns for that year
             df[year_columns] = 0
 
+    if not Pipeline.DELETE_DOUBLE_LINKS:
+        aadt_columns = []
+        for year in year_suffixes:
+            aadt_columns.append(df.filter(regex=f'_{year}$', axis=1).columns.tolist())
+
+        aadt_columns = [elemento for sublista in aadt_columns for elemento in sublista]
+        aadt_measurement_columns = list(set(aadt_columns) - set(exclude_aadt_measurements))
+
+        # Division del AADT por sentido
+        df[aadt_measurement_columns] = df[aadt_measurement_columns]/2
     return df
+
+def reindex_dataframes(nodes_all: pd.DataFrame,
+                               links_all: pd.DataFrame,
+                               start: int = 0):
+    """
+    Reindexa los DataFrames de nodos y enlaces:
+      - nodes_all: renombra 'ID' → 'ID_old', crea 'ID' consecutivo.
+      - links_all: renombra 'INODE' → 'INODE_old', 'JNODE' → 'JNODE_old', y crea las nuevas columnas.
+    Devuelve:
+      nodes_new, links_new, m_old2new, m_new2old
+    donde m_old2new es dict {id_old: id_new} y m_new2old su inverso.
+    
+    Parámetros:
+      start: valor inicial para el nuevo ID (por defecto 0; poner 1 si prefieres IDs desde 1).
+    """
+    # --- 1) Copiar para no mutar originales
+    nodes = nodes_all.copy()
+    links = links_all.copy()
+
+    # --- 2) Crear mapeo old → new
+    unique_ids = sorted(nodes['ID'].unique())
+    m_old2new = {old: new for new, old in enumerate(unique_ids, start=start)}
+    m_new2old = {new: old for old, new in m_old2new.items()}
+
+    # --- 3) Reindexar nodes
+    nodes = nodes.rename(columns={'ID': 'ID_old'})
+    nodes['ID'] = nodes['ID_old'].map(m_old2new)
+    nodes = nodes.set_index('ID', drop=True)
+
+    # --- 4) Reindexar links
+    links = links.rename(columns={'INODE': 'INODE_old', 'JNODE': 'JNODE_old'})
+    links['INODE'] = links['INODE_old'].map(m_old2new)
+    links['JNODE'] = links['JNODE_old'].map(m_old2new)
+    links = links.reset_index(drop=True)
+
+    # --- 5) Devolver resultados
+    return nodes, links, m_old2new, m_new2old
+
+import pickle
+import os
+
+class HandlePickle:
+
+    def __init__(self):
+        pass
+
+    def save_pickle(self, route: str, filename: str, **variables):
+        """
+        Guarda múltiples variables nombradas en un archivo pickle.
+        Se pasan como argumentos nombrados: save_pickle(x=var1, y=var2, route=..., filename=...)
+
+        :param route: Ruta del archivo.
+        :param filename: Nombre del archivo.
+        :param variables: Variables a guardar (como nombre=valor).
+        """
+        full_path = os.path.join(route, f"{filename}.pkl")
+        with open(full_path, 'wb') as f:
+            pickle.dump(variables, f)
+
+    def open_pickle(self, route: str, filename: str):
+        """
+        Carga variables desde un archivo pickle.
+
+        :param route: Ruta del archivo.
+        :param filename: Nombre del archivo.
+        :return: Diccionario con variables recuperadas.
+        """
+        full_path = os.path.join(route, f"{filename}.pkl")
+        with open(full_path, 'rb') as f:
+            variables = pickle.load(f)
+        return variables
+

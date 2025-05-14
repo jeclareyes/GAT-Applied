@@ -3,46 +3,51 @@
 import logging
 import networkx as nx
 import json
+import pandas as pd
 from shapely.geometry import Point
 
 logger = logging.getLogger(__name__)
 
 class GraphBuilder:
-    def __init__(self, direction_field='DIRECTION'):
-        self.direction_field = direction_field
+    def __init__(self, node_type= 'node_type', edge_type='edge_type'):
+        self.node_type = node_type
+        self.edge_type = edge_type
 
     def build(self, gdf_segments, gdf_nodes):
         G = nx.DiGraph()
-        coord_to_id = {}
 
+        # Iterando sobre los nodos
         for idx, row in gdf_nodes.iterrows():
-            node_id = f"node_{idx}"
-            x, y = row.geometry.x, row.geometry.y
-            key = (round(x, 6), round(y, 6))
-            coord_to_id[key] = node_id
-            G.add_node(node_id,
-                       tipo=row.get('tipo'),
-                       coord_x=float(x),
-                       coord_y=float(y))
+            pos= row.geometry.x, row.geometry.y
+            exclude = ['X', 'Y', 'geometry']
+            attrs = {'pos': pos}
+            attrs = {k: v for k, v in row.items() if k not in exclude}
+            G.add_node(idx,
+                       **attrs)
         logger.info(f"Agregados {len(G.nodes())} nodos al grafo")
 
+        # Iterando sobre los links
         added = 0
         for idx, row in gdf_segments.iterrows():
             geom = row.geometry
             if geom is None or geom.is_empty or len(geom.coords) < 2:
                 continue
-            start, end = geom.coords[0], geom.coords[-1]
-            skey = (round(start[0], 6), round(start[1], 6))
-            ekey = (round(end[0], 6), round(end[1], 6))
-            if skey not in coord_to_id or ekey not in coord_to_id:
-                logger.debug(f"Segmento {idx} sin nodos definidos")
-                continue
-            src, tgt = coord_to_id[skey], coord_to_id[ekey]
-            direction = row.get(self.direction_field, 'forward')
-            source, target = (tgt, src) if str(direction).lower() == 'reverse' else (src, tgt)
-            attrs = {k: v for k, v in row.items() if k != 'geometry'}
-            G.add_edge(source, target, **attrs)
-            added += 1
+
+            if row['edge_type'] == 'road':
+                # Existen los dos links INODE y JNODE definen la direccion
+                exclude = []
+                attrs = {k: v for k, v in row.items() if k not in exclude}
+                G.add_edge(row['INODE'], row['JNODE'], **attrs)
+                added += 1
+            if row['edge_type'] != 'road':
+                # hay que duplicarlo y que hay que hacer tambien JNODE e INODE 
+                # para hacer la otra direccion
+                exclude = ['geometry']
+                attrs = {k: v for k, v in row.items() if k not in exclude}
+                G.add_edge(row['INODE'], row['JNODE'], **attrs)
+                added += 1
+                G.add_edge(row['JNODE'], row['INODE'], **attrs)
+                added += 1
         logger.info(f"Agregadas {added} aristas al grafo")
         return G
 
@@ -94,12 +99,23 @@ class GraphExporter:
 
     def _sanitize_attributes(self, G):
         G_copy = G.copy()
+
+        def sanitize(value):
+            if pd.isna(value) or value is None:
+                return ""
+            if isinstance(value, (list, dict, tuple, set)):
+                return str(value)
+            return value
+
         for n, attrs in G_copy.nodes(data=True):
             for k, v in list(attrs.items()):
-                if isinstance(v, (list, dict, tuple, set)):
-                    G_copy.nodes[n][k] = str(v)
+                G_copy.nodes[n][k] = sanitize(v)
+
         for u, v, attrs in G_copy.edges(data=True):
             for k, val in list(attrs.items()):
-                if isinstance(val, (list, dict, tuple, set)):
-                    G_copy.edges[u, v][k] = str(val)
+                G_copy.edges[u, v][k] = sanitize(val)
+
+        for k, v in list(G_copy.graph.items()):
+            G_copy.graph[k] = sanitize(v)
+
         return G_copy

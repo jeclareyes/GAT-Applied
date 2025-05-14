@@ -4,13 +4,14 @@ import time
 import argparse
 import sys
 import logging
-from configs.settings import Paths, Pipeline, Filenames, Regex, Fields, Layer
+import networkx as nx
+from configs.settings import Paths, Pipeline, Filenames, Regex, Fields, Layer, INPUT_CRS, DEFAULT_PLOT_PARAMS, AADT_DISPLAY_CONFIG
 from export_utils import GeoPackageExporter, ReportLogger
 from data_ingestion import GeoPackageHandler
 from network_processing import *
 from graph_tools import GraphBuilder, GraphAnalyzer, GraphExporter
-from map_visualization import FoliumMapBuilder
-from project_utils import process_aadt_columns
+from map_visualization import NetworkVisualizerOSMnx
+from project_utils import process_aadt_columns, reindex_dataframes, HandlePickle
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -228,14 +229,17 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
         # Eliminar los dobles sentidos de Network
         # Crear columnas con los pares ordenados
-        Network_Links['node_min'] = Network_Links[['INODE', 'JNODE']].min(axis=1)
-        Network_Links['node_max'] = Network_Links[['INODE', 'JNODE']].max(axis=1)
+        if Pipeline.DELETE_DOUBLE_LINKS:
+            Network_Links['node_min'] = Network_Links[['INODE', 'JNODE']].min(axis=1)
+            Network_Links['node_max'] = Network_Links[['INODE', 'JNODE']].max(axis=1)
 
-        # Eliminar duplicados basados en los pares ordenados
-        Network_Links = Network_Links.drop_duplicates(subset=['node_min', 'node_max'])
+            # Eliminar duplicados basados en los pares ordenados
+            Network_Links = Network_Links.drop_duplicates(subset=['node_min', 'node_max'])
 
-        # Opcional: eliminar columnas auxiliares si ya no las necesitas
-        Network_Links = Network_Links.drop(columns=['node_min', 'node_max'])
+            # Opcional: eliminar columnas auxiliares si ya no las necesitas
+            Network_Links = Network_Links.drop(columns=['node_min', 'node_max'])
+        
+
 
         # Anadir tipo a cada capa
         Network_Links['edge_type'] = 'road'
@@ -278,6 +282,8 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
             logical_link = LineString([taz.geometry, nearest_point])
             new_links.append({"geometry": logical_link, 'INODE': new_node_id, 'JNODE': taz['ID'],
+                              "LENGTH": logical_link.length/1000, "edge_type": "taz_link", "LOG_DIRECTION": 1})
+            new_links.append({"geometry": logical_link, 'INODE': taz['ID'], 'JNODE': new_node_id,
                               "LENGTH": logical_link.length/1000, "edge_type": "taz_link", "LOG_DIRECTION": 0})
 
         # Conectar AUX Nodes a la red
@@ -286,7 +292,9 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
             nearest_node_geom, nearest_node_id = Network_Nodes.loc[nearest_node_idx, ["geometry", "ID"]]
             aux_link = LineString([aux.geometry.coords[0], nearest_node_geom.coords[0]])
             new_links.append({"geometry": aux_link, 'INODE': aux['ID'], 'JNODE': nearest_node_id,
-                              'LENGTH': aux_link.length/1000, "edge_type": "aux_link", 'LOG_DIRECTION': 0})
+                              'LENGTH': aux_link.length/1000, "edge_type": "aux_link", 'LOG_DIRECTION': 1})
+            new_links.append({"geometry": aux_link, 'INODE': nearest_node_id, 'JNODE': aux['ID'],
+                              'LENGTH': aux_link.length/1000, "edge_type": "aux_link", 'LOG_DIRECTION': 1})
         
         # Tratamiento de las columnas de AADT
         Network_Links = process_aadt_columns(Network_Links)
@@ -306,6 +314,9 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
                                             gpd.GeoDataFrame(new_links, crs=Network_Links.crs)]))
 
 
+        # Reindexado para consistencia. 
+
+        ready_nodes, ready_links, _, _ = reindex_dataframes(nodes_all, links_all)
 
         # --- Guardar resultados
         final_geopackage_name = Filenames.FINAL_NETWORK
@@ -313,13 +324,14 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
 
 
         # --- Como Pickle
-
-        #TODO Exportacion de Pickle
+        HandlePickle().save_pickle(route=Paths.OUTPUT_DIR, 
+                                 filename=Filenames.FINAL_NETWORK, 
+                                 variables= (ready_links, ready_nodes))
 
         # --- Como Geopackage
         export = GeoPackageExporter(export_path)
-        export.export_nodes(nodes_all, layer='nodes')
-        export.export_segments(links_all, layer='links')
+        export.export_nodes(ready_nodes, layer='nodes')
+        export.export_segments(ready_links, layer='links')
             
         # Fabricas 2 y 5
 
@@ -344,21 +356,97 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         # ODM
         x = 1
 
-
     if Pipeline.PHASE_GRAPH_ANALYSIS:
+
         # Construcción del grafo y análisis
         logger.info("Construyendo y exportando grafo")
-        G = GraphBuilder().build(gdf_links, gdf_nodes)
+
+        try:
+        # Importando como desde Pickle
+            retrieved_variables = HandlePickle().open_pickle(route=Paths.OUTPUT_DIR, 
+                                    filename=Filenames.FINAL_NETWORK)
+
+            links, nodes = retrieved_variables['variables'][0], retrieved_variables['variables'][1]
+        except FileNotFoundError:
+            logging.warning(f"No se pudo hacer carga desde archivo Pickle")
+            try:
+                # Si no, se importa como geopackage
+                geo_dataframe_route = Paths.GEOPACKAGES_DIR / Filenames.FINAL_NETWORK
+
+                nodes = GeoPackageHandler(geo_dataframe_route).read_layer(layer_name="nodes")
+                links = GeoPackageHandler(geo_dataframe_route).read_layer(layer_name="links")
+            except FileNotFoundError:
+                    logging.error(f"No se pudo carga ni pickle ni geopackage")
+
+        
+        
+        G = GraphBuilder(node_type='node_type', edge_type='edge_type')
+
+        # 'INODE', 'JNODE', 'LENGTH' 'edge_type'
+        G = GraphBuilder().build(links, nodes)
+
         GraphExporter(output_dir + "/grafo_vial").export_graphml(G)
-        report = GraphAnalyzer().analyze(G)
+        # report = GraphAnalyzer().analyze(G)
 
     if Pipeline.PHASE_VISUALIZATION:
         # Visualización
-        folium_map = FoliumMapBuilder().build([gdf_links.to_crs(epsg=4326), gdf_nodes.to_crs(epsg=4326)])
-        folium_map.save(f"{output_dir}/mapa_interactivo.html")
+        logging.info("Pipeline: Visualization.")
 
-    report_logger.export()
-    logger.info("Pipeline finalizado")
+        # 1. Importacion de Data
+        try:
+        # Importando como desde Pickle
+            retrieved_variables = HandlePickle().open_pickle(route=Paths.OUTPUT_DIR, 
+                                    filename=Filenames.FINAL_NETWORK)
+
+            links, nodes = retrieved_variables['variables'][0], retrieved_variables['variables'][1]
+        except FileNotFoundError:
+            logging.warning(f"No se pudo hacer carga desde archivo Pickle")
+            try:
+                # Si no, se importa como geopackage
+                geo_dataframe_route = Paths.GEOPACKAGES_DIR / Filenames.FINAL_NETWORK
+
+                nodes = GeoPackageHandler(geo_dataframe_route).read_layer(layer_name="nodes")
+                links = GeoPackageHandler(geo_dataframe_route).read_layer(layer_name="links")
+            except FileNotFoundError:
+                    logging.error(f"No se pudo carga ni pickle ni geopackage")
+
+        # 2. Instancias de configuracion
+
+        # Importa NetworkVisualizerOSMnx de map_visualization.
+        # Importa node_plot_cfg, edge_plot_cfg (y quizás otras configuraciones globales) de setup.
+        # Carga los datos (nodos, arcos).
+        # Instancia NetworkVisualizerOSMnx pasándole las configuraciones importadas.
+        # Llama a visualizer.plot()
+
+        from map_visualization import NetworkVisualizerOSMnx
+        from configs.settings import node_plot_cfg, edge_plot_cfg, AADT_DISPLAY_CONFIG
+
+        # 3. --- Inicializar y Graficar ---
+        visualizer = NetworkVisualizerOSMnx(
+            nodes_gdf=nodes,
+            links_gdf=links,
+            node_plot_config=node_plot_cfg,
+            edge_plot_config=edge_plot_cfg,
+            graph_crs=INPUT_CRS # Especificar el CRS de tus datos
+        )
+
+        plot_kwargs = DEFAULT_PLOT_PARAMS.copy()
+        
+        # Añadir/Sobrescribir configuraciones específicas para esta ejecución del plot
+        plot_kwargs["selected_year_for_labels"] = DEFAULT_PLOT_PARAMS.get("selected_year_for_labels", 2022) # Tomar de defaults o un valor fijo
+        plot_kwargs["aadt_label_config"] = AADT_DISPLAY_CONFIG
+        
+        # Construir la ruta de guardado
+        # El nombre del archivo puede ser más dinámico si se desea
+        plot_filename = f"{Filenames.FINAL_NETWORK}_visualization_{plot_kwargs['selected_year_for_labels']}.png"
+        plot_kwargs["save_path"] = Paths.VISUALIZATION_DIR / plot_filename
+
+        visualizer.plot(**plot_kwargs)    
+
+        report_logger.export()
+
+
+        logger.info("Pipeline finalizado")
 
 
 if __name__ == '__main__':
