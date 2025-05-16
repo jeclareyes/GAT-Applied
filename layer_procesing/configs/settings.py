@@ -260,15 +260,15 @@ AADT_DISPLAY_CONFIG = {
 # --- PARÁMETROS DE PLOTEO POR DEFECTO (usados en pipeline.py) (Recomendación 6) ---
 DEFAULT_PLOT_PARAMS = {
     "figsize": (100, 100), 
-    "dpi": 500,
+    "dpi": 300,
     "selected_year_for_labels": 2022, 
     "bgcolor": "w", # Color de fondo por defecto para el plot
     "show_basemap": True, # Mostrar o no el mapa base por defecto
     # "basemap_source": cx.providers.OpenStreetMap.Mapnik, # Fuente del mapa base por defecto (Recomendación 2 omitida, pero podrías ponerlo aquí si quieres un default simple)
-    # "basemap_zoom": "auto", # Zoom del mapa base por defecto
+    "basemap_zoom": "auto", # Zoom del mapa base por defecto
     "save_plot": True, # Guardar o no la figura por defecto
     "close_plot_after_save": True, # Cerrar la figura después de guardarla
-    "plot_file_format": "png", # Formato de archivo por defecto
+    "plot_file_format": "pdf", # Formato de archivo por defecto
     # "plot_filepath_default_name": "network_visualization", # Nombre base para el archivo guardado (sin extensión)
 }
 

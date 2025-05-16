@@ -1,10 +1,18 @@
 # pipeline.py: script principal para correr all el flujo
+import sys
+import os
+
+proyecto_path = os.path.abspath("C:/Users/SEJC94056/Documents/AADT_CodeProject/GAT-Applied")
+if proyecto_path not in sys.path:
+    sys.path.insert(0, proyecto_path)
 
 import time
 import argparse
 import sys
 import logging
 import networkx as nx
+from shapely.ops import split
+from shapely.geometry import LineString, Point
 from configs.settings import Paths, Pipeline, Filenames, Regex, Fields, Layer, INPUT_CRS, DEFAULT_PLOT_PARAMS, AADT_DISPLAY_CONFIG
 from export_utils import GeoPackageExporter, ReportLogger
 from data_ingestion import GeoPackageHandler
@@ -12,6 +20,7 @@ from network_processing import *
 from graph_tools import GraphBuilder, GraphAnalyzer, GraphExporter
 from map_visualization import NetworkVisualizerOSMnx
 from project_utils import process_aadt_columns, reindex_dataframes, HandlePickle
+from layer_procesing.interactive_visualization.app import launch_dash_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -252,39 +261,135 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
         # Arreglar ID de nodos
         Auxiliar_Nodes['ID'] = Auxiliar_Nodes["ID"] + int(2000)
 
+        NODE_TOLERANCE = 0.1
         # Conectar TAZ nodes a la red.
         for idx, taz in TAZ_Nodes.iterrows():
-            nearest_link_idx = Network_Links.distance(taz.geometry).idxmin()
-            link_geom, start_node_idx, end_node_idx = Network_Links.loc[nearest_link_idx,  ["geometry", 'INODE', 'JNODE']]
+            nearest_link_idx = Network_Links.geometry.distance(taz.geometry).idxmin()
+            link_row = Network_Links.loc[nearest_link_idx]
+            link_geom = link_row['geometry']
+            start_node_idx = link_row['INODE']
+            end_node_idx = link_row['JNODE']
+
+            # Obtener geometría de nodos
+            start_node_geom = Network_Nodes.loc[Network_Nodes['ID'] == start_node_idx, 'geometry'].values[0]
+            end_node_geom = Network_Nodes.loc[Network_Nodes['ID'] == end_node_idx, 'geometry'].values[0]
+
             nearest_point = link_geom.interpolate(link_geom.project(taz.geometry))
 
-            new_node_id = int(idx+1000)
-            new_int_nodes.append({
-                "ID": new_node_id,
-                "geometry": nearest_point,
-                "node_type": "Intersection",
-                'X': nearest_point.x,
-                'Y': nearest_point.y
-            })
+            # Verificar si el punto ya es un nodo existente
+            if nearest_point.distance(start_node_geom) < NODE_TOLERANCE:
+                node_to_connect = start_node_idx
+            elif nearest_point.distance(end_node_geom) < NODE_TOLERANCE:
+                node_to_connect = end_node_idx
+            else:
+                node_to_connect = None
 
-            start = link_geom.coords[0]
-            end = link_geom.coords[-1]
-            inter = nearest_point.coords[0]
+            if node_to_connect is not None:
+                # Conexión directa al nodo existente, sin cortar el link
+                taz_link_geom = LineString([taz.geometry, Network_Nodes.loc[Network_Nodes['ID'] == node_to_connect, 'geometry'].values[0]])
+                taz_attrs = {
+                    "geometry": taz_link_geom,
+                    "LENGTH": taz_link_geom.length / 1000,
+                    "edge_type": "taz_link"
+                }
 
-            link1 = LineString([start, inter])
-            link2 = LineString([inter, end])
+                new_links.append({**taz_attrs, "INODE": node_to_connect, "JNODE": taz['ID'], "LOG_DIRECTION": 1})
+                new_links.append({**taz_attrs, "INODE": taz['ID'], "JNODE": node_to_connect, "LOG_DIRECTION": 0})
+                continue  # saltar el resto del proceso para este TAZ
+            else:
+                # Dividir la geometría del link original en dos partes
+                coords = list(link_geom.coords)
+                projected_dist = link_geom.project(nearest_point)
+                split_point = link_geom.interpolate(projected_dist)
 
-            #INODE, JNODE, LENGTH
-            new_links.append({"geometry": link1, 'INODE': int(start_node_idx), 'JNODE': new_node_id, 
-                              'LENGTH': link1.length/1000, "edge_type": "road", "LOG_DIRECTION": 0})
-            new_links.append({"geometry": link2, 'INODE': new_node_id, 'JNODE': int(end_node_idx), 
-                              'LENGTH': link2.length/1000, "edge_type": "road", "LOG_DIRECTION": 0})
+                # Insertar el punto de división en la secuencia de coordenadas
+                def split_linestring_at_point(line, point):
+                    coords = list(line.coords)
+                    dists = [line.project(Point(c)) for c in coords]
+                    proj = line.project(point)
 
-            logical_link = LineString([taz.geometry, nearest_point])
-            new_links.append({"geometry": logical_link, 'INODE': new_node_id, 'JNODE': taz['ID'],
-                              "LENGTH": logical_link.length/1000, "edge_type": "taz_link", "LOG_DIRECTION": 1})
-            new_links.append({"geometry": logical_link, 'INODE': taz['ID'], 'JNODE': new_node_id,
-                              "LENGTH": logical_link.length/1000, "edge_type": "taz_link", "LOG_DIRECTION": 0})
+                    # Separar las coordenadas en dos tramos, incluyendo el punto intermedio
+                    first_coords = [c for i, c in enumerate(coords) if dists[i] <= proj]
+                    second_coords = [c for i, c in enumerate(coords) if dists[i] >= proj]
+
+                    # Insertar explícitamente el punto de corte si no está ya
+                    if tuple(point.coords[0]) not in first_coords:
+                        first_coords.append(tuple(point.coords[0]))
+                    if tuple(point.coords[0]) not in second_coords:
+                        second_coords.insert(0, tuple(point.coords[0]))
+
+                    return LineString(first_coords), LineString(second_coords)
+
+                geom1, geom2 = split_linestring_at_point(link_geom, nearest_point)
+
+                # Extraer atributos comunes
+                base_attrs = link_row.drop(labels=["geometry", "INODE", "JNODE", "LENGTH"]).to_dict()
+
+                # Crear nuevo nodo intersección
+                new_node_id = int(idx + 1000)
+                new_int_nodes.append({
+                    "ID": new_node_id,
+                    "geometry": nearest_point,
+                    "node_type": "Intersection",
+                    'X': nearest_point.x,
+                    'Y': nearest_point.y
+                })
+
+                # Crear 4 nuevos links con geometría real preservada
+                # Sentido start -> inter
+                new_links.append({
+                    **base_attrs,
+                    "geometry": geom1,
+                    "INODE": int(start_node_idx),
+                    "JNODE": new_node_id,
+                    "LENGTH": geom1.length / 1000,
+                    "LOG_DIRECTION": 0
+                })
+                new_links.append({
+                    **base_attrs,
+                    "geometry": LineString(list(geom1.coords)[::-1]),
+                    "INODE": new_node_id,
+                    "JNODE": int(start_node_idx),
+                    "LENGTH": geom1.length / 1000,
+                    "LOG_DIRECTION": 0
+                })
+
+                # Sentido inter -> end
+                new_links.append({
+                    **base_attrs,
+                    "geometry": geom2,
+                    "INODE": new_node_id,
+                    "JNODE": int(end_node_idx),
+                    "LENGTH": geom2.length / 1000,
+                    "LOG_DIRECTION": 0
+                })
+                new_links.append({
+                    **base_attrs,
+                    "geometry": LineString(list(geom2.coords)[::-1]),
+                    "INODE": int(end_node_idx),
+                    "JNODE": new_node_id,
+                    "LENGTH": geom2.length / 1000,
+                    "LOG_DIRECTION": 0
+                })
+
+                # Crear links lógicos al nodo TAZ
+                taz_link_geom = LineString([taz.geometry, nearest_point])
+                taz_attrs = {
+                    "geometry": taz_link_geom,
+                    "LENGTH": taz_link_geom.length / 1000,
+                    "edge_type": "taz_link"
+                }
+
+                new_links.append({**taz_attrs, "INODE": new_node_id, "JNODE": taz['ID'], "LOG_DIRECTION": 1})
+                new_links.append({**taz_attrs, "INODE": taz['ID'], "JNODE": new_node_id, "LOG_DIRECTION": 0})
+
+                # Eliminar ambos links existentes entre start ↔ end
+                reverse_link_idx = Network_Links[
+                    ((Network_Links['INODE'] == start_node_idx) & (Network_Links['JNODE'] == end_node_idx)) |
+                    ((Network_Links['INODE'] == end_node_idx) & (Network_Links['JNODE'] == start_node_idx))
+                ].index
+
+                Network_Links = Network_Links.drop(index=reverse_link_idx)
 
         # Conectar AUX Nodes a la red
         for idx, aux in Auxiliar_Nodes.iterrows():
@@ -410,41 +515,34 @@ def run_pipeline(lastkajen_dir=None, input_dir=None, output_dir=None, tolerance=
             except FileNotFoundError:
                     logging.error(f"No se pudo carga ni pickle ni geopackage")
 
-        # 2. Instancias de configuracion
 
-        # Importa NetworkVisualizerOSMnx de map_visualization.
-        # Importa node_plot_cfg, edge_plot_cfg (y quizás otras configuraciones globales) de setup.
-        # Carga los datos (nodos, arcos).
-        # Instancia NetworkVisualizerOSMnx pasándole las configuraciones importadas.
-        # Llama a visualizer.plot()
-
-        from map_visualization import NetworkVisualizerOSMnx
-        from configs.settings import node_plot_cfg, edge_plot_cfg, AADT_DISPLAY_CONFIG
-
-        # 3. --- Inicializar y Graficar ---
-        visualizer = NetworkVisualizerOSMnx(
-            nodes_gdf=nodes,
-            links_gdf=links,
-            node_plot_config=node_plot_cfg,
-            edge_plot_config=edge_plot_cfg,
-            graph_crs=INPUT_CRS # Especificar el CRS de tus datos
-        )
-
-        plot_kwargs = DEFAULT_PLOT_PARAMS.copy()
+        # Verificar si los datos se cargaron correctamente
+        if nodes is not None and not nodes.empty and \
+           links is not None and not links.empty:
+            
+            logging.info("Lanzando la aplicación Dash de visualización interactiva...")
+            try:
+                # Pasar los GeoDataFrames cargados a la aplicación Dash
+                # Puedes configurar el puerto y el modo debug según necesites
+                launch_dash_app(
+                    nodes_input_gdf=nodes,
+                    links_input_gdf=links,
+                    port=8051,  # Puedes usar un puerto diferente si el 8050 está ocupado
+                    debug_mode=True # O False para un entorno más "de producción"
+                )
+                # La ejecución del pipeline se pausará aquí hasta que cierres la app Dash (si se ejecuta en el mismo proceso/thread)
+                # o si la app Dash se lanza en un subproceso, el pipeline podría continuar.
+                # Por defecto, app.run() es bloqueante.
+                logging.info("Aplicación Dash cerrada.")
+            except Exception as e:
+                logging.error(f"Error al lanzar la aplicación Dash: {e}", exc_info=True)
+        else:
+            logging.error("No se pudieron cargar los datos necesarios para la visualización interactiva. Saltando.")
         
-        # Añadir/Sobrescribir configuraciones específicas para esta ejecución del plot
-        plot_kwargs["selected_year_for_labels"] = DEFAULT_PLOT_PARAMS.get("selected_year_for_labels", 2022) # Tomar de defaults o un valor fijo
-        plot_kwargs["aadt_label_config"] = AADT_DISPLAY_CONFIG
-        
-        # Construir la ruta de guardado
-        # El nombre del archivo puede ser más dinámico si se desea
-        plot_filename = f"{Filenames.FINAL_NETWORK}_visualization_{plot_kwargs['selected_year_for_labels']}.png"
-        plot_kwargs["save_path"] = Paths.VISUALIZATION_DIR / plot_filename
-
-        visualizer.plot(**plot_kwargs)    
+        # report_logger.export() # Si tienes un logger de reporte para esta fase
+        logger.info("Fase de visualización interactiva del Pipeline completada (o intentada).")
 
         report_logger.export()
-
 
         logger.info("Pipeline finalizado")
 
